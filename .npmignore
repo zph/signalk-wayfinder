@@ -1,0 +1,7 @@
+.git/
+node_modules/
+src/
+test-data/
+claudisms/
+code_review_*.md
+things-opencode-will-not-do-again.md
