@@ -51,6 +51,7 @@ import { SignalKApp } from './lib/signalk-app';
 import { computeGridBounds } from './lib/grid';
 import { RoutingAlgorithm } from './lib/routing/algorithm';
 import { IsochroneAlgorithm } from './lib/routing/isochrone';
+import { wayfinderCapabilities } from './lib/capabilities';
 
 const ALGORITHMS: Map<string, RoutingAlgorithm> = new Map([['isochrone', new IsochroneAlgorithm()]]);
 
@@ -212,8 +213,8 @@ module.exports = (app: SignalKApp) => {
   }
 
   const plugin = {
-    id: 'signalk-weather-routing',
-    name: 'Weather Routing',
+    id: 'signalk-wayfinder',
+    name: 'Sail Wayfinder',
 
     start: async (cfg: PluginSettings) => {
       // Schema migration: saved configs from before REQ-32 have gribPath instead of gribDir.
@@ -395,6 +396,18 @@ module.exports = (app: SignalKApp) => {
     registerWithRouter: (router: Router) => {
       const leafletDist = nodepath.join(nodepath.dirname(require.resolve('leaflet/package.json')), 'dist');
       router.use('/leaflet', express.static(leafletDist));
+
+      // The Binnacle client needs a small, stable readiness contract before it can offer a plan.
+      // A missing safety input is deliberately not treated as a degraded route-calculation mode.
+      router.get('/api/v1/capabilities', (_req: Request, res: Response) => {
+        res.json(
+          wayfinderCapabilities({
+            hasPolar: polar !== null,
+            hasForecast: gribFiles.length > 0,
+            hasShoreline: edgeIndex !== null,
+          }),
+        );
+      });
 
       router.post('/calculate', async (req: Request, res: Response) => {
         if (gribFiles.length === 0)

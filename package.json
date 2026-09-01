@@ -1,12 +1,12 @@
 {
-  "name": "signalk-weather-routing",
+  "name": "signalk-wayfinder",
   "version": "0.8.0",
-  "description": "Weather routing plugin for SignalK using GRIB2 forecasts and isochrone algorithm",
+  "description": "Fail-closed sail passage planning for Signal K",
   "author": "Kristian Wiklund",
-  "homepage": "https://github.com/kristianwiklund/signalk-weather-routing",
+  "homepage": "https://github.com/zph/signalk-wayfinder",
   "repository": {
     "type": "git",
-    "url": "https://github.com/kristianwiklund/signalk-weather-routing.git"
+    "url": "https://github.com/zph/signalk-wayfinder.git"
   },
   "keywords": [
     "signalk-node-server-plugin",
@@ -14,7 +14,7 @@
     "signalk-category-weather"
   ],
   "signalk": {
-    "displayName": "Weather Routing",
+    "displayName": "Sail Wayfinder",
     "appIcon": "./wr-icon-128px.png",
     "screenshots": ["screenshot2.jpg", "route-to-route-demo.png"]
   },
