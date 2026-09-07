@@ -3,7 +3,7 @@
 import * as nodepath from 'node:path';
 import * as fs from 'node:fs/promises';
 import { createWriteStream } from 'node:fs';
-import express, { Router, Request, Response } from 'express';
+import express, { Request, Response } from 'express';
 
 // Side-effect: copies gdal-async .node binary from optional dep — must run before ./lib/grib
 import './lib/ensure-gdal-binary';
@@ -52,6 +52,7 @@ import { computeGridBounds } from './lib/grid';
 import { RoutingAlgorithm } from './lib/routing/algorithm';
 import { IsochroneAlgorithm } from './lib/routing/isochrone';
 import { wayfinderCapabilities } from './lib/capabilities';
+import { binnacleRoute, type PluginRouter } from './lib/binnacle-route-access';
 
 const ALGORITHMS: Map<string, RoutingAlgorithm> = new Map([['isochrone', new IsochroneAlgorithm()]]);
 
@@ -395,13 +396,13 @@ module.exports = (app: SignalKApp) => {
       },
     }),
 
-    registerWithRouter: (router: Router) => {
+    registerWithRouter: (router: PluginRouter) => {
       const leafletDist = nodepath.join(nodepath.dirname(require.resolve('leaflet/package.json')), 'dist');
       router.use('/leaflet', express.static(leafletDist));
 
       // The Binnacle client needs a small, stable readiness contract before it can offer a plan.
       // A missing safety input is deliberately not treated as a degraded route-calculation mode.
-      router.get('/api/v1/capabilities', (_req: Request, res: Response) => {
+      binnacleRoute(router, 'capabilities').get('/api/v1/capabilities', (_req: Request, res: Response) => {
         res.json(
           wayfinderCapabilities({
             hasPolar: polar !== null,
@@ -411,7 +412,7 @@ module.exports = (app: SignalKApp) => {
         );
       });
 
-      router.post('/calculate', async (req: Request, res: Response) => {
+      binnacleRoute(router, 'calculate').post('/calculate', async (req: Request, res: Response) => {
         if (gribFiles.length === 0)
           return void res.status(503).json({
             error: 'No GRIB files indexed — configure gribDir and reload',
@@ -671,7 +672,7 @@ module.exports = (app: SignalKApp) => {
         }
       });
 
-      router.get('/status', (_req: Request, res: Response) => {
+      binnacleRoute(router, 'status').get('/status', (_req: Request, res: Response) => {
         res.json({
           ...calcStatus,
           dilatedIndexReady,
@@ -682,7 +683,7 @@ module.exports = (app: SignalKApp) => {
         });
       });
 
-      router.post('/cancel', (_req: Request, res: Response) => {
+      binnacleRoute(router, 'cancel').post('/cancel', (_req: Request, res: Response) => {
         const wasCalculating = calcStatus.status === 'calculating';
         calculationSequence += 1;
         pendingRoute = null;
@@ -1007,7 +1008,7 @@ module.exports = (app: SignalKApp) => {
         });
       });
 
-      router.post('/save-route', async (req: Request, res: Response) => {
+      binnacleRoute(router, 'saveRoute').post('/save-route', async (req: Request, res: Response) => {
         if (!pendingRoute) return void res.status(404).json({ error: 'No pending route to save' });
         const name: string = req.body?.name?.trim() || `Weather Route ${new Date().toLocaleString()}`;
         try {
