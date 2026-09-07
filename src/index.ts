@@ -23,6 +23,8 @@ import {
   RouteQualityReport,
   LatLon,
   DepthProvider,
+  RouteAlternativeSummary,
+  RoutingObjective,
 } from './types';
 import {
   loadGrib,
@@ -58,6 +60,13 @@ import { binnacleRoute, type PluginRouter } from './lib/binnacle-route-access';
 import { assessRouteQuality, routeQualityWarning } from './lib/route-quality';
 import { loadGdalBathymetry } from './lib/gdal-bathymetry';
 import { navigationConstraintViolation, type NavigationConstraints } from './lib/navigation-safety';
+import {
+  optionsForAlternative,
+  rankDistinctAlternatives,
+  ROUTING_OBJECTIVES,
+  type RouteAlternative,
+} from './lib/route-alternatives';
+import { resolveVesselDraft, STANDARD_DRAFT_PATHS } from './lib/vessel-draft';
 
 const ALGORITHMS: Map<string, RoutingAlgorithm> = new Map([['isochrone', new IsochroneAlgorithm()]]);
 
@@ -81,6 +90,8 @@ module.exports = (app: SignalKApp) => {
   let calcStatus: CalculationStatus = { status: 'idle', progress: 0 };
   let pendingRoute: import('./types').RoutePoint[] | null = null;
   let pendingRouteQuality: RouteQualityReport | null = null;
+  let pendingAlternatives: Array<RouteAlternative & { summary: RouteAlternativeSummary }> = [];
+  let pendingVesselDraft: { valueM: number; path: string } | null = null;
   let calculationSequence = 0;
   const sseClients = new Set<Response>();
 
@@ -404,11 +415,34 @@ module.exports = (app: SignalKApp) => {
           minimum: 0,
           maximum: 24,
         },
+        alternativeCount: {
+          type: 'integer',
+          title: 'Default route alternatives',
+          description: 'Number of distinct ranked routes to request. Binnacle can override this per calculation.',
+          default: 5,
+          minimum: 1,
+          maximum: 10,
+        },
+        motorSpeedKn: {
+          type: 'number',
+          title: 'Default engine cruising speed (knots)',
+          description: 'Used by fastest routes with engine assistance and required for all-motoring routes.',
+          default: 0,
+          minimum: 0,
+          maximum: 100,
+        },
+        vesselDraftPath: {
+          type: 'string',
+          title: 'Signal K vessel draft path',
+          description:
+            'Signal K self-vessel path used to prefill draft. Defaults to design.draft.current, then maximum and minimum.',
+          default: STANDARD_DRAFT_PATHS[0],
+        },
         bathymetryPath: {
           type: 'string',
-          title: 'Bathymetry raster path',
+          title: 'Legacy bathymetry raster path',
           description:
-            'Optional local path to a GDAL-readable raster with complete numeric depth coverage for constrained routes.',
+            'Optional legacy GDAL depth check for direct API clients. Binnacle relies on installed charts and vessel draft instead.',
         },
         bathymetryBand: {
           type: 'integer',
@@ -488,13 +522,21 @@ module.exports = (app: SignalKApp) => {
 
       // The Binnacle client needs a small, stable readiness contract before it can offer a plan.
       // A missing safety input is deliberately not treated as a degraded route-calculation mode.
-      binnacleRoute(router, 'capabilities').get('/api/v1/capabilities', (_req: Request, res: Response) => {
+      binnacleRoute(router, 'capabilities').get('/api/v1/capabilities', (req: Request, res: Response) => {
+        const requestedDraftPath = typeof req.query.draftPath === 'string' ? req.query.draftPath.trim() : '';
+        const savedDraftPath = settings?.vesselDraftPath?.trim() || '';
+        const configuredDraftPath = requestedDraftPath || savedDraftPath || STANDARD_DRAFT_PATHS[0];
         res.json(
           wayfinderCapabilities({
             hasPolar: polar !== null,
             hasForecast: gribFiles.length > 0,
             hasShoreline: edgeIndex !== null,
-            depthSource: depthProvider ? nodepath.basename(depthProvider.source) : undefined,
+            vesselDraft: resolveVesselDraft(
+              app,
+              configuredDraftPath,
+              !requestedDraftPath && (!savedDraftPath || savedDraftPath === STANDARD_DRAFT_PATHS[0]),
+            ),
+            configuredDraftPath,
           }),
         );
       });
@@ -505,6 +547,7 @@ module.exports = (app: SignalKApp) => {
             error: 'No GRIB files indexed — configure gribDir and reload',
           });
         if (!polar) return void res.status(503).json({ error: 'Polar data not loaded' });
+        const routePolar = polar;
         if (calcStatus.status === 'calculating') {
           return void res.status(409).json({ error: 'Calculation already in progress' });
         }
@@ -524,6 +567,8 @@ module.exports = (app: SignalKApp) => {
           maxHeadingChange: settings?.maxHeadingChange,
           daylightOnly: settings?.daylightOnly,
           maxHoursPerDay: settings?.maxHoursPerDay,
+          alternativeCount: settings?.alternativeCount ?? 5,
+          motorSpeedKn: settings?.motorSpeedKn ?? 0,
           minimumDepthM: settings?.minimumDepthM,
           minimumShoreDistanceNm: settings?.minimumShoreDistanceNm,
           maximumOffshoreDistanceNm: settings?.maximumOffshoreDistanceNm,
@@ -674,6 +719,16 @@ module.exports = (app: SignalKApp) => {
         const sequence = ++calculationSequence;
         pendingRoute = null;
         pendingRouteQuality = null;
+        pendingAlternatives = [];
+        const savedDraftPath = settings?.vesselDraftPath?.trim() || '';
+        const discoveredDraft = resolveVesselDraft(
+          app,
+          savedDraftPath || STANDARD_DRAFT_PATHS[0],
+          !savedDraftPath || savedDraftPath === STANDARD_DRAFT_PATHS[0],
+        );
+        const requestedDraftM = Number(mergedOptions.vesselDraftM ?? 0);
+        pendingVesselDraft =
+          requestedDraftM > 0 ? { valueM: requestedDraftM, path: 'request override' } : (discoveredDraft ?? null);
         calcStatus = { status: 'calculating', progress: 0 };
         res.json({ status: 'calculating' });
 
@@ -700,104 +755,112 @@ module.exports = (app: SignalKApp) => {
 
           const wind = new MultiFileWindProvider(loadedEntries);
 
-          let route: RoutePoint[];
-          let warning: string | undefined;
-
           const activeCurrentProvider = req.body.useCurrentGrib === false ? null : currentProvider;
+          const objective = (mergedOptions.objective ?? 'fastest') as RoutingObjective;
+          if (!ROUTING_OBJECTIVES.includes(objective)) throw new Error(`Unsupported routing objective: ${objective}`);
+          const requestedCount = Math.max(1, Math.min(10, Number(mergedOptions.alternativeCount ?? 5)));
+          if (objective === 'allMotoring' && !(Number(mergedOptions.motorSpeedKn) > 0)) {
+            throw new Error('All-motoring routes require an engine cruising speed greater than 0 knots');
+          }
+          const attemptCount = requestedCount === 1 ? 1 : Math.min(20, requestedCount * 2);
+          const candidates: RouteAlternative[] = [];
+          let lastCandidateError: Error | undefined;
 
-          if (waypoints.length === 0) {
-            const result = await algorithm.calculate(
-              wind,
-              activeCurrentProvider,
-              polar,
-              activeIndex,
-              regionIndex,
-              req.body,
-              (pct, frontier) => {
-                if (sequence !== calculationSequence) throw new Error('Calculation cancelled');
-                calcStatus = { status: 'calculating', progress: pct, frontier };
-                pushSse({ type: 'progress', progress: pct, frontier });
-              },
-              mergedOptions,
-              { shorelineIndex: edgeIndex, depthProvider },
-            );
-            route = result.route;
-            warning = result.warning;
-          } else {
+          const calculateOne = async (
+            runOptions: Record<string, unknown>,
+            attempt: number,
+          ): Promise<{ route: RoutePoint[]; warning?: string }> => {
+            const reportProgress = (fraction: number, frontier: Array<[number, number]>): void => {
+              if (sequence !== calculationSequence) throw new Error('Calculation cancelled');
+              const progress = ((attempt + fraction) / attemptCount) * 100;
+              calcStatus = { status: 'calculating', progress, frontier };
+              pushSse({ type: 'progress', progress, frontier });
+            };
+            if (waypoints.length === 0) {
+              return algorithm.calculate(
+                wind,
+                activeCurrentProvider,
+                routePolar,
+                activeIndex,
+                regionIndex,
+                req.body,
+                (pct, frontier) => reportProgress(pct / 100, frontier),
+                runOptions,
+                { shorelineIndex: edgeIndex, depthProvider },
+              );
+            }
             const points: Array<LatLon> = [start, ...waypoints, end];
-            const segCount = points.length - 1;
             const fullRoute: RoutePoint[] = [];
             const warnings: string[] = [];
-
-            for (let i = 0; i < segCount; i++) {
-              const segStart = points[i];
-              const segEnd = points[i + 1];
-              const segDepartureTime = i === 0 ? departureTime : fullRoute[fullRoute.length - 1].time.toISOString();
-              const progressBase = i / segCount;
-              const progressTop = (i + 1) / segCount;
-
+            for (let i = 0; i < points.length - 1; i++) {
               const segResult = await algorithm.calculate(
                 wind,
                 activeCurrentProvider,
-                polar,
+                routePolar,
                 activeIndex,
                 regionIndex,
                 {
                   ...req.body,
-                  start: segStart,
-                  end: segEnd,
-                  departureTime: segDepartureTime,
+                  start: points[i],
+                  end: points[i + 1],
+                  departureTime: i === 0 ? departureTime : fullRoute.at(-1)!.time.toISOString(),
                 },
-                (pct, frontier) => {
-                  if (sequence !== calculationSequence) throw new Error('Calculation cancelled');
-                  const mapped = progressBase * 100 + pct * (progressTop - progressBase);
-                  calcStatus = {
-                    status: 'calculating',
-                    progress: mapped,
-                    frontier,
-                  };
-                  pushSse({ type: 'progress', progress: mapped, frontier });
-                },
-                mergedOptions,
+                (pct, frontier) => reportProgress((i + pct / 100) / (points.length - 1), frontier),
+                runOptions,
                 { shorelineIndex: edgeIndex, depthProvider },
               );
-
               if (segResult.warning) warnings.push(`Leg ${i + 1}: ${segResult.warning}`);
-              // Skip the first point of subsequent segments to avoid duplicate junction waypoints.
               fullRoute.push(...(i === 0 ? segResult.route : segResult.route.slice(1)));
             }
+            return { route: fullRoute, warning: warnings.length > 0 ? warnings.join('; ') : undefined };
+          };
 
-            route = fullRoute;
-            warning = warnings.length > 0 ? warnings.join('; ') : undefined;
+          for (let attempt = 0; attempt < attemptCount; attempt++) {
+            try {
+              const runOptions = optionsForAlternative(mergedOptions, objective, attempt, requestedCount);
+              const result = await calculateOne(runOptions, attempt);
+              const quality = assessRouteQuality(result.route, {
+                start,
+                ...(result.warning ? {} : { end }),
+                polar: routePolar,
+                landIndex: activeIndex,
+                shorelineIndex: edgeIndex,
+                regionIndex,
+                avoidRegionIds: new Set(req.body.avoidRegionIds ?? settings?.avoidRegionIds ?? []),
+                useLandAvoidance,
+                gribFiles: loadedEntries.map((entry) => entry.meta),
+                forecastSkillHorizonHours: Number(settings?.forecastSkillHorizonHours ?? 96),
+                motorSpeedKn: Number(runOptions.motorSpeedKn ?? 0),
+                motorBelowKn: Number(runOptions.motorBelowKn ?? 0),
+                daylightOnly: Boolean(runOptions.daylightOnly ?? false),
+                maxHoursPerDay: Number(runOptions.maxHoursPerDay ?? 0),
+                depthProvider,
+                navigationConstraints,
+              });
+              if (quality.valid) {
+                candidates.push({ route: result.route, warning: result.warning, quality, complete: !result.warning });
+              } else {
+                lastCandidateError = new Error(
+                  `Route quality checks failed: ${quality.issues
+                    .filter((issue) => issue.severity === 'error')
+                    .map((issue) => issue.message)
+                    .join(' ')}`,
+                );
+              }
+            } catch (error) {
+              if (sequence !== calculationSequence) return;
+              lastCandidateError = error instanceof Error ? error : new Error(String(error));
+            }
           }
 
           if (sequence !== calculationSequence) return;
-          const quality = assessRouteQuality(route, {
-            start,
-            ...(warning ? {} : { end }),
-            polar,
-            landIndex: activeIndex,
-            shorelineIndex: edgeIndex,
-            regionIndex,
-            avoidRegionIds: new Set(req.body.avoidRegionIds ?? settings?.avoidRegionIds ?? []),
-            useLandAvoidance,
-            gribFiles: loadedEntries.map((entry) => entry.meta),
-            forecastSkillHorizonHours: Number(settings?.forecastSkillHorizonHours ?? 96),
-            motorSpeedKn: Number(mergedOptions.motorSpeedKn ?? 0),
-            motorBelowKn: Number(mergedOptions.motorBelowKn ?? 0),
-            daylightOnly: Boolean(mergedOptions.daylightOnly ?? false),
-            maxHoursPerDay: Number(mergedOptions.maxHoursPerDay ?? 0),
-            depthProvider,
-            navigationConstraints,
-          });
-          if (!quality.valid) {
-            throw new Error(
-              `Route quality checks failed: ${quality.issues
-                .filter((issue) => issue.severity === 'error')
-                .map((issue) => issue.message)
-                .join(' ')}`,
-            );
-          }
+          pendingAlternatives = rankDistinctAlternatives(candidates, objective, requestedCount);
+          if (pendingAlternatives.length === 0)
+            throw lastCandidateError ?? new Error('No valid route alternatives found');
+          const selectedAlternative = pendingAlternatives[0];
+          const route = selectedAlternative.route;
+          const warning = selectedAlternative.warning;
+          const quality = selectedAlternative.quality;
           pendingRoute = route;
           pendingRouteQuality = quality;
           const qualityWarning = routeQualityWarning(quality);
@@ -805,21 +868,34 @@ module.exports = (app: SignalKApp) => {
             calcFailedFiles.length > 0
               ? `${calcFailedFiles.length} GRIB file(s) failed to load: ${calcFailedFiles.map((f) => f.path.split('/').pop()).join(', ')}`
               : undefined;
-          const combinedWarning = [warning, loadWarning, qualityWarning].filter(Boolean).join('; ') || undefined;
+          const alternativesWarning =
+            pendingAlternatives.length < requestedCount
+              ? `Found ${pendingAlternatives.length} distinct route${pendingAlternatives.length === 1 ? '' : 's'} of ${requestedCount} requested`
+              : undefined;
+          const waveDataWarning =
+            objective === 'bestWeather' &&
+            pendingAlternatives.every((alternative) => alternative.summary.averageWaveHeightM === null)
+              ? 'Wave data is unavailable; best-weather alternatives are ranked by wind only'
+              : undefined;
+          const summaries = pendingAlternatives.map((alternative) => alternative.summary);
+          const combinedWarning =
+            [warning, loadWarning, qualityWarning, alternativesWarning, waveDataWarning].filter(Boolean).join('; ') ||
+            undefined;
           if (combinedWarning) {
             calcStatus = {
               status: 'warning',
               progress: 100,
               warning: combinedWarning,
               quality,
+              alternatives: summaries,
             };
             app.setPluginStatus(
               `${warning ? 'Partial route' : 'Route ready'}: ${route.length} waypoints (quality warning)`,
             );
             pushSse({ type: 'warning', warning: calcStatus.warning });
           } else {
-            calcStatus = { status: 'done', progress: 100, quality };
-            app.setPluginStatus(`Route ready: ${route.length} waypoints`);
+            calcStatus = { status: 'done', progress: 100, quality, alternatives: summaries };
+            app.setPluginStatus(`${pendingAlternatives.length} route alternative(s) ready`);
             pushSse({ type: 'done' });
           }
           closeSseClients();
@@ -852,6 +928,8 @@ module.exports = (app: SignalKApp) => {
         calculationSequence += 1;
         pendingRoute = null;
         pendingRouteQuality = null;
+        pendingAlternatives = [];
+        pendingVesselDraft = null;
         calcStatus = { status: 'idle', progress: 0 };
         closeSseClients();
         res.json({ cancelled: wasCalculating });
@@ -1146,17 +1224,21 @@ module.exports = (app: SignalKApp) => {
         res.end(']}');
       });
 
-      router.get('/pending-route', (_req: Request, res: Response) => {
-        if (!pendingRoute) return void res.status(404).json({ error: 'No pending route' });
+      router.get('/pending-route', (req: Request, res: Response) => {
+        const requestedIndex = Number(req.query.index ?? 0);
+        const alternative = Number.isInteger(requestedIndex) ? pendingAlternatives[requestedIndex] : undefined;
+        const selectedRoute = alternative?.route ?? (requestedIndex === 0 ? pendingRoute : null);
+        const selectedQuality = alternative?.quality ?? (requestedIndex === 0 ? pendingRouteQuality : null);
+        if (!selectedRoute) return void res.status(404).json({ error: 'No pending route at that index' });
         res.json({
           feature: {
             type: 'Feature',
             geometry: {
               type: 'LineString',
-              coordinates: pendingRoute.map((p) => [p.lon, p.lat]),
+              coordinates: selectedRoute.map((p) => [p.lon, p.lat]),
             },
             properties: {
-              coordinatesMeta: pendingRoute.map((p) => ({
+              coordinatesMeta: selectedRoute.map((p) => ({
                 name: p.time.toISOString(),
                 time: p.time.toISOString(),
                 windDir: Math.round(p.windDir),
@@ -1164,21 +1246,31 @@ module.exports = (app: SignalKApp) => {
                 twa: Math.round(p.twa),
                 tws: Math.round(p.tws * 10) / 10,
                 ...(p.boatSpeed !== undefined ? { boatSpeed: Math.round(p.boatSpeed * 10) / 10 } : {}),
+                ...(p.propulsion ? { propulsion: p.propulsion } : {}),
                 legCalcMs: p.legCalcMs,
                 ...(p.waveHeight !== undefined ? { waveHeight: Math.round(p.waveHeight * 100) / 100 } : {}),
                 ...(p.gribFilePath !== undefined ? { gribFile: p.gribFilePath } : {}),
               })),
-              wayfinderQuality: pendingRouteQuality,
+              wayfinderQuality: selectedQuality,
+              wayfinderAlternative: alternative?.summary,
+              vesselDraft: pendingVesselDraft,
             },
           },
         });
       });
 
       binnacleRoute(router, 'saveRoute').post('/save-route', async (req: Request, res: Response) => {
-        if (!pendingRoute) return void res.status(404).json({ error: 'No pending route to save' });
+        const requestedIndex = Number(req.body?.alternativeIndex ?? 0);
+        const alternative = Number.isInteger(requestedIndex) ? pendingAlternatives[requestedIndex] : undefined;
+        const selectedRoute = alternative?.route ?? (requestedIndex === 0 ? pendingRoute : null);
+        const selectedQuality = alternative?.quality ?? (requestedIndex === 0 ? pendingRouteQuality : null);
+        if (!selectedRoute) return void res.status(404).json({ error: 'No pending route at that index to save' });
         const name: string = req.body?.name?.trim() || `Weather Route ${new Date().toLocaleString()}`;
         try {
-          const routeId = await saveRoute(app, pendingRoute, name, pendingRouteQuality ?? undefined);
+          const routeId = await saveRoute(app, selectedRoute, name, selectedQuality ?? undefined, {
+            alternative: alternative?.summary,
+            vesselDraft: pendingVesselDraft ?? undefined,
+          });
           res.json({ routeId });
         } catch (e: any) {
           res.status(500).json({ error: e.message });

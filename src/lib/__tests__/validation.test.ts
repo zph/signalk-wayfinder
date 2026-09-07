@@ -88,3 +88,49 @@ test('validateCalculateInput: validates navigation safety constraint values', ()
     error: 'options.minimumShoreDistanceNm must be between 0 and 50',
   });
 });
+
+test('validateCalculateInput: validates route objectives, alternatives, and draft', () => {
+  const base = {
+    start: { lat: 1, lon: 2 },
+    end: { lat: 3, lon: 4 },
+    departureTime: '2026-06-21T12:00:00Z',
+  };
+  assert.deepEqual(
+    validateCalculateInput({
+      ...base,
+      options: {
+        objective: 'bestWeather',
+        alternativeCount: 10,
+        vesselDraftM: 1.8,
+      },
+    }),
+    { valid: true },
+  );
+  assert.deepEqual(validateCalculateInput({ ...base, options: { objective: 'shortest' } }), {
+    valid: false,
+    error: 'options.objective must be one of fastest, leastMotoring, allMotoring, bestWeather',
+  });
+  assert.deepEqual(validateCalculateInput({ ...base, options: { alternativeCount: 11 } }), {
+    valid: false,
+    error: 'options.alternativeCount must be an integer between 1 and 10',
+  });
+  assert.deepEqual(validateCalculateInput({ ...base, options: { vesselDraftM: -1 } }), {
+    valid: false,
+    error: 'options.vesselDraftM must be between 0 and 100',
+  });
+});
+
+test('validateCalculateInput: all-motoring requires a positive engine speed', () => {
+  const base = {
+    start: { lat: 1, lon: 2 },
+    end: { lat: 3, lon: 4 },
+    departureTime: '2026-06-21T12:00:00Z',
+  };
+  assert.deepEqual(validateCalculateInput({ ...base, options: { objective: 'allMotoring', motorSpeedKn: 0 } }), {
+    valid: false,
+    error: 'options.motorSpeedKn must be greater than 0 for allMotoring',
+  });
+  assert.deepEqual(validateCalculateInput({ ...base, options: { objective: 'allMotoring', motorSpeedKn: 6 } }), {
+    valid: true,
+  });
+});

@@ -129,6 +129,8 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
     const maxWaveM = Number(options?.maxWaveM ?? 0); // 0 = no limit
     const motorSpeedKn = Number(options?.motorSpeedKn ?? 0); // 0 = no motor
     const motorBelowKn = Number(options?.motorBelowKn ?? 0); // 0 = disabled
+    const forceMotor = Boolean(options?.forceMotor ?? false);
+    const headingOffsetDeg = Number(options?.headingOffsetDeg ?? 0);
     const waitForWind = Boolean(options?.waitForWind ?? false);
     const daylightOnly = Boolean(options?.daylightOnly ?? false);
     const requestedMaxHours = Number(options?.maxHoursPerDay ?? 0);
@@ -242,6 +244,7 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
             twa: point.parent === undefined ? 0 : trueWindAngle(point.heading, wdir),
             tws,
             boatSpeed: 0,
+            propulsion: 'wait',
             windDir: wdir,
             passageDayIndex: restBudget.passageDayIndex,
             underwayHoursToday: restBudget.hoursToday,
@@ -292,7 +295,8 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
 
         const candidatesBeforeHeadings = candidates.length;
         let rejectedByDaylight = false;
-        for (let hdg = 0; hdg < 360; hdg += headingStep) {
+        for (let rawHeading = headingOffsetDeg; rawHeading < 360 + headingOffsetDeg; rawHeading += headingStep) {
+          const hdg = ((rawHeading % 360) + 360) % 360;
           const deviation = Math.abs(((hdg - pointToDestBearing + 180 + 360) % 360) - 180);
           if (deviation > coneHalfAngle) continue;
 
@@ -307,8 +311,8 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
 
           const polarSpeed = interpolateBoatSpeed(polar, twa, tws);
           // REQ-84: motor fires when polarSpeed < motorBelowKn threshold.
-          const effectiveSpeed =
-            motorBelowKn > 0 && motorSpeedKn > 0 && polarSpeed < motorBelowKn ? motorSpeedKn : polarSpeed;
+          const motoring = motorSpeedKn > 0 && (forceMotor || (motorBelowKn > 0 && polarSpeed < motorBelowKn));
+          const effectiveSpeed = motoring ? motorSpeedKn : polarSpeed;
           // REQ-82: below minimum → zero-speed gate before discard.
           if (effectiveSpeed < minBoatSpeed) {
             // REQ-83: stay in place for one candidate per frontier point; advancing time only.
@@ -385,6 +389,7 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
             twa,
             tws,
             boatSpeed: effectiveSpeed,
+            propulsion: motoring ? 'motor' : 'sail',
             windDir: wdir,
             passageDayIndex: underwayBudget.passageDayIndex,
             underwayHoursToday: underwayBudget.hoursToday,
@@ -591,6 +596,7 @@ function backtrack(
       twa: arrived.twa,
       tws: arrived.tws,
       boatSpeed: arrived.boatSpeed,
+      propulsion: arrived.propulsion,
       windDir: arrived.windDir,
       legCalcMs: 0,
       waveHeight: wind.getWave(end.lat, end.lon, arrived.time),
@@ -614,6 +620,7 @@ function backtrack(
       twa: cur.parent === undefined ? 0 : trueWindAngle(cur.heading, resampledWindDir),
       tws: windSpeedKnots(resampled.u, resampled.v),
       boatSpeed: cur.boatSpeed,
+      propulsion: cur.propulsion,
       windDir: resampledWindDir,
       legCalcMs: cur.stepCalcMs,
       waveHeight: wind.getWave(cur.lat, cur.lon, cur.time),

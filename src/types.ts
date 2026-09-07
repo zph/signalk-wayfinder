@@ -123,6 +123,7 @@ export interface IsochronePoint {
   twa: number;
   tws: number;
   boatSpeed?: number; // undefined on the seed (departure) point which has no computed speed
+  propulsion?: PropulsionMode;
   windDir: number;
   stepCalcMs: number; // wall-clock ms to compute the isochrone step that created this point
   gribFilePath?: string;
@@ -139,11 +140,15 @@ export interface RoutePoint {
   twa: number; // degrees, 0–180
   tws: number; // knots
   boatSpeed?: number; // knots; undefined on the departure waypoint
+  propulsion?: PropulsionMode;
   windDir: number; // meteorological: degrees FROM which wind blows, 0–360
   legCalcMs: number; // wall-clock ms the algorithm spent computing this leg; 0 for start and destination
   waveHeight?: number; // significant wave height (m), present when swh data available in GRIB
   gribFilePath?: string; // path of the GRIB file that supplied weather data at this waypoint
 }
+
+export type PropulsionMode = 'sail' | 'motor' | 'wait';
+export type RoutingObjective = 'fastest' | 'leastMotoring' | 'allMotoring' | 'bestWeather';
 
 export interface CalculationRequest {
   start: LatLon;
@@ -177,6 +182,22 @@ export interface CalculationStatus {
   warning?: string;
   frontier?: Array<[number, number]>; // [lat, lon] pairs of current isochrone frontier
   quality?: RouteQualityReport;
+  alternatives?: RouteAlternativeSummary[];
+}
+
+export interface RouteAlternativeSummary {
+  index: number;
+  objective: RoutingObjective;
+  complete: boolean;
+  durationHours: number;
+  distanceNm: number;
+  motorHours: number;
+  averageWaveHeightM: number | null;
+  maximumWaveHeightM: number | null;
+  averageWindKn: number;
+  maximumWindKn: number;
+  warning?: string;
+  quality: RouteQualityReport;
 }
 
 export interface RouteQualityIssue {
@@ -197,6 +218,11 @@ export interface RouteQualityReport {
     underwayHours: number;
     passageDays: number;
     minimumObservedDepthM: number | null;
+    motorHours: number;
+    averageWaveHeightM: number | null;
+    maximumWaveHeightM: number | null;
+    averageWindKn: number;
+    maximumWindKn: number;
   };
 }
 
@@ -229,6 +255,9 @@ export interface PluginSettings {
   minimumDepthM?: number;
   minimumShoreDistanceNm?: number;
   maximumOffshoreDistanceNm?: number;
+  vesselDraftPath?: string;
+  alternativeCount?: number;
+  motorSpeedKn?: number;
   avoidRegionIds?: string[];
 }
 

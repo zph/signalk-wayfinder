@@ -73,6 +73,13 @@ export function assessRouteQuality(route: RoutePoint[], context: RouteQualityCon
   let budgetDayIndex = 0;
   let underwayHoursToday = 0;
   let minimumObservedDepthM: number | null = null;
+  let motorHours = 0;
+  let waveHeightTotal = 0;
+  let waveHeightCount = 0;
+  let maximumWaveHeightM: number | null = null;
+  let windSpeedTotal = 0;
+  let windSpeedCount = 0;
+  let maximumWindKn = 0;
 
   if (route.length < 2) add('too-few-points', 'error', 'Route has fewer than two points.');
 
@@ -96,6 +103,16 @@ export function assessRouteQuality(route: RoutePoint[], context: RouteQualityCon
     }
     if (point.boatSpeed !== undefined && (!Number.isFinite(point.boatSpeed) || point.boatSpeed < 0)) {
       add('invalid-boat-speed', 'error', `Route point ${i + 1} has an invalid boat speed.`);
+    }
+    if (Number.isFinite(point.tws)) {
+      windSpeedTotal += point.tws;
+      windSpeedCount++;
+      maximumWindKn = Math.max(maximumWindKn, point.tws);
+    }
+    if (point.waveHeight !== undefined && Number.isFinite(point.waveHeight)) {
+      waveHeightTotal += point.waveHeight;
+      waveHeightCount++;
+      maximumWaveHeightM = Math.max(maximumWaveHeightM ?? point.waveHeight, point.waveHeight);
     }
 
     if (context.useLandAvoidance && context.landIndex && isPointOnLand(context.landIndex, point.lat, point.lon)) {
@@ -151,6 +168,7 @@ export function assessRouteQuality(route: RoutePoint[], context: RouteQualityCon
     if (isUnderway) {
       const elapsedHours = elapsedMs / 3_600_000;
       underwayHours += elapsedHours;
+      if (point.propulsion === 'motor') motorHours += elapsedHours;
       if (context.daylightOnly && !isLegInDaylight(previous.time, point.time, previous, point)) {
         add('night-sailing', 'error', `Route leg ${i} is underway outside daylight.`);
       }
@@ -229,7 +247,10 @@ export function assessRouteQuality(route: RoutePoint[], context: RouteQualityCon
     if (point.boatSpeed !== undefined && point.boatSpeed > 0) {
       const polarSpeed = interpolateBoatSpeed(context.polar, point.twa, point.tws);
       const motoring =
-        context.motorBelowKn > 0 && context.motorSpeedKn > 0 && Math.abs(point.boatSpeed - context.motorSpeedKn) <= 0.2;
+        point.propulsion === 'motor' ||
+        (context.motorBelowKn > 0 &&
+          context.motorSpeedKn > 0 &&
+          Math.abs(point.boatSpeed - context.motorSpeedKn) <= 0.2);
       if (!motoring && point.twa < context.polar.twa[0]) {
         add(
           'polar-no-go-angle',
@@ -291,6 +312,11 @@ export function assessRouteQuality(route: RoutePoint[], context: RouteQualityCon
       underwayHours,
       passageDays: route.length > 0 ? budgetDayIndex + 1 : 0,
       minimumObservedDepthM,
+      motorHours,
+      averageWaveHeightM: waveHeightCount > 0 ? waveHeightTotal / waveHeightCount : null,
+      maximumWaveHeightM,
+      averageWindKn: windSpeedCount > 0 ? windSpeedTotal / windSpeedCount : 0,
+      maximumWindKn,
     },
   };
 }

@@ -86,6 +86,19 @@ test('accepts a route whose geometry, time, and displayed wind pattern agree', (
   assert.deepEqual(report.issues, []);
   assert.equal(report.metrics.pointCount, 2);
   assert.ok(report.metrics.totalDistanceNm > 3);
+  assert.equal(report.metrics.averageWindKn, 10);
+  assert.equal(report.metrics.maximumWindKn, 10);
+});
+
+test('reports explicit motoring time and wave conditions', () => {
+  const route = validRoute();
+  route[0].waveHeight = 0.8;
+  route[1].waveHeight = 1.2;
+  route[1].propulsion = 'motor';
+  const report = assessRouteQuality(route, context());
+  assert.equal(report.metrics.motorHours, 1);
+  assert.equal(report.metrics.averageWaveHeightM, 1);
+  assert.equal(report.metrics.maximumWaveHeightM, 1.2);
 });
 
 test('fails a route whose TWA disagrees with heading and resampled wind direction', () => {

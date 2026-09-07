@@ -1,6 +1,6 @@
 // Saves a computed route to SignalK resources/routes as a GeoJSON Feature.
 
-import { RoutePoint, RouteQualityReport } from '../types';
+import { RouteAlternativeSummary, RoutePoint, RouteQualityReport } from '../types';
 import { haversineNM } from './geo';
 import { SignalKApp } from './signalk-app';
 
@@ -9,6 +9,10 @@ export async function saveRoute(
   route: RoutePoint[],
   name: string,
   quality?: RouteQualityReport,
+  metadata?: {
+    alternative?: RouteAlternativeSummary;
+    vesselDraft?: { valueM: number; path: string };
+  },
 ): Promise<string> {
   const uuid = crypto.randomUUID();
 
@@ -36,11 +40,14 @@ export async function saveRoute(
           twa: Math.round(p.twa),
           tws: Math.round(p.tws * 10) / 10,
           ...(p.boatSpeed !== undefined ? { boatSpeed: Math.round(p.boatSpeed * 10) / 10 } : {}),
+          ...(p.propulsion ? { propulsion: p.propulsion } : {}),
           legCalcMs: p.legCalcMs,
           ...(p.waveHeight !== undefined ? { waveHeight: Math.round(p.waveHeight * 100) / 100 } : {}),
           ...(p.gribFilePath !== undefined ? { gribFile: p.gribFilePath } : {}),
         })),
         ...(quality ? { wayfinderQuality: quality } : {}),
+        ...(metadata?.alternative ? { wayfinderAlternative: metadata.alternative } : {}),
+        ...(metadata?.vesselDraft ? { vesselDraft: metadata.vesselDraft } : {}),
       },
     },
   };
