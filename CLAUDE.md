@@ -1,4 +1,4 @@
-# signalk-weather-routing
+# Sail Wayfinder
 
 A SignalK plugin that calculates optimal sailing routes using GRIB2 weather forecasts and the isochrone method. Meteorolical data from GRIB2 files. Polar diagrams in ORC/OpenCPN semicolon-delimited CSV format. Land avoidance via GSHHG. Result stored in SignalK `resources/routes` for use in other applications. Leaflet-based UI.
 

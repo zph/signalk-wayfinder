@@ -1,4 +1,4 @@
-# signalk-weather-routing
+# Sail Wayfinder
 
 > [!CAUTION]
 > ⚠️ **Experimental — read before use.** ⚠️
@@ -31,7 +31,7 @@ See [CHANGELOG](CHANGELOG.md) for the full feature history.
 - A polar diagram file in ORC/OpenCPN CSV format
 - Platform: linux/x64 or linux/arm64 (Raspberry Pi 3/4/5, Node 22 or 24)
 
-The full specification — implemented requirements, open backlog, and design decisions — is in [SPEC.md](SPEC.md). To request a new feature or report a bug, [open an issue on GitHub](https://github.com/kristianwiklund/signalk-weather-routing/issues/new).
+The full specification — implemented requirements, open backlog, and design decisions — is in [SPEC.md](SPEC.md).
 
 ### Hardware Specs
 
@@ -53,7 +53,7 @@ By default the plugin uses the GSHHG **h** (high) resolution tier (~1 km coastli
 
 To activate: copy `edge-index-hires.bin.gz` and `dilated-edge-index-hires.bin.gz` from that repository into the plugin's `data/` directory alongside the standard index files, then restart SignalK. The plugin detects the files automatically and switches to f-tier land avoidance with no further configuration. When active, the "Land overlay" checkbox in the sidebar is labelled "Land overlay (hires)".
 
-Open **Server → Plugin Config → Weather Routing** in the SignalK admin UI.
+Open **Server → Plugin Config → Sail Wayfinder** in the SignalK admin UI.
 
 ### Required settings
 
@@ -90,7 +90,7 @@ For development builds, see [DEVELOPMENT.md](DEVELOPMENT.md).
 
 ## Usage
 
-Open the webapp at `http://<your-signalk-host>:3000/signalk-weather-routing/`.
+Open the webapp at `http://<your-signalk-host>:3000/signalk-wayfinder/`.
 
 ### Basic workflow
 

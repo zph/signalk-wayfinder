@@ -24,7 +24,7 @@ docker exec signalk-server sh -c \
 
 # Run the build script
 docker exec signalk-server sh -c \
-  "cd /home/node/.signalk/_weather-routing-src && \
+  "cd /home/node/.signalk/_wayfinder-src && \
    python3 scripts/prepare-land-data.py"
 ```
 
@@ -36,9 +36,9 @@ Progress is printed to stdout.
 After the script finishes, copy the generated files to the host repo and commit:
 
 ```bash
-cp <signalk-server-repo>/docker/signalk_conf/_weather-routing-src/data/edge-index.bin.gz \
+cp <signalk-server-repo>/docker/signalk_conf/_wayfinder-src/data/edge-index.bin.gz \
    <plugin-src>/data/
-cp <signalk-server-repo>/docker/signalk_conf/_weather-routing-src/data/dilated-edge-index.bin.gz \
+cp <signalk-server-repo>/docker/signalk_conf/_wayfinder-src/data/dilated-edge-index.bin.gz \
    <plugin-src>/data/
 ```
 
@@ -51,11 +51,11 @@ tarball, then install from that.
 
 ```bash
 # 1. Copy source into the bind-mounted volume so the container can see it
-cp -r <plugin-src> <signalk-server-repo>/docker/signalk_conf/_weather-routing-src
+cp -r <plugin-src> <signalk-server-repo>/docker/signalk_conf/_wayfinder-src
 
 # 2. Install dev deps, compile TypeScript, pack
 docker exec signalk-server sh -c \
-  "cd /home/node/.signalk/_weather-routing-src && \
+  "cd /home/node/.signalk/_wayfinder-src && \
    npm install && \
    npm run build && \
    npm pack --ignore-scripts"
@@ -63,18 +63,18 @@ docker exec signalk-server sh -c \
 # 3. Install from the tarball (real copy, not symlink)
 docker exec signalk-server sh -c \
   "cd /home/node/.signalk && \
-   npm install --ignore-scripts ./_weather-routing-src/signalk-weather-routing-0.1.0.tgz"
+   npm install --ignore-scripts ./_wayfinder-src/signalk-wayfinder-0.8.0.tgz"
 
 # 4. Clean up
-docker exec signalk-server sh -c "rm -rf /home/node/.signalk/_weather-routing-src"
-rm -rf <signalk-server-repo>/docker/signalk_conf/_weather-routing-src
+docker exec signalk-server sh -c "rm -rf /home/node/.signalk/_wayfinder-src"
+rm -rf <signalk-server-repo>/docker/signalk_conf/_wayfinder-src
 
 # 5. Restart SignalK to load the plugin
 docker restart signalk-server
 ```
 
-The plugin appears under **Server → Plugin Config → Weather Routing** in the admin UI.  
-The webapp is at `http://<host>:3000/signalk-weather-routing/`.
+The plugin appears under **Server → Plugin Config → Sail Wayfinder** in the admin UI.  
+The webapp is at `http://<host>:3000/signalk-wayfinder/`.
 
 ## Rebuilding after TypeScript changes
 
@@ -82,9 +82,9 @@ Recompile in-place inside the installed package, then reload via the SignalK API
 
 ```bash
 docker exec signalk-server sh -c \
-  "cd /home/node/.signalk/node_modules/signalk-weather-routing && npm run build"
+  "cd /home/node/.signalk/node_modules/signalk-wayfinder && npm run build"
 
-curl -X PUT http://localhost:3000/skServer/plugins/signalk-weather-routing/restart
+curl -X PUT http://localhost:3000/skServer/plugins/signalk-wayfinder/restart
 ```
 
 ## Deploying static-only changes (public/)
@@ -108,14 +108,14 @@ easy to verify the expected code is deployed.
 
 ```bash
 docker exec signalk-server sh -c \
-  "cd /home/node/.signalk/node_modules/signalk-weather-routing && npm test"
+  "cd /home/node/.signalk/node_modules/signalk-wayfinder && npm test"
 ```
 
 ## Uninstalling
 
 ```bash
 docker exec signalk-server sh -c \
-  "cd /home/node/.signalk && npm uninstall signalk-weather-routing"
+  "cd /home/node/.signalk && npm uninstall signalk-wayfinder"
 docker restart signalk-server
 ```
 
@@ -127,14 +127,14 @@ Three workflows run automatically:
 
 **Build** (`.github/workflows/build.yml`) — manual trigger (`workflow_dispatch`). Builds `gdal-async` from source on both `x64` (ubuntu-latest) and `arm64` (ubuntu-24.04-arm) runners for both Node.js 22 and Node.js 24, assembles the four ABIs into sub-packages, packs the plugin tarball, and uploads it as an artifact. Useful for pre-release verification.
 
-**Publish** (`.github/workflows/publish.yml`) — triggers when a version tag (`v*`) is pushed. Downloads prebuilt `gdal-async` binaries from the `kristianwiklund/wr-gdal-async-prebuilt` GitHub Release matching the resolved `gdal-async` version, then publishes both sub-packages to npm, runs tests, and publishes the main `signalk-weather-routing` package. No native build step on the publish path — binaries must already exist in `wr-gdal-async-prebuilt` before tagging.
+**Publish** (`.github/workflows/publish.yml`) — triggers when a version tag (`v*`) is pushed. Downloads prebuilt `gdal-async` binaries from the `kristianwiklund/wr-gdal-async-prebuilt` GitHub Release matching the resolved `gdal-async` version, then publishes both sub-packages to npm, runs tests, and publishes the main `signalk-wayfinder` package. No native build step on the publish path — binaries must already exist in `wr-gdal-async-prebuilt` before tagging.
 
 ### Architecture
 
 The plugin ships its `gdal-async` native binary via platform-specific optional dependencies:
 
 ```
-signalk-weather-routing          (thin main package, ~2 MB)
+signalk-wayfinder                (thin main package, ~2 MB)
   dependencies:    gdal-async, jsts
   optionalDeps:
     @kristianwiklund/wr-gdal-linux-x64    [os:linux, cpu:x64]
@@ -158,6 +158,6 @@ At startup, `src/lib/ensure-gdal-binary.ts` copies the matching binary from the 
    git tag vX.Y.Z
    git push origin main --tags
    ```
-6. The publish workflow fires automatically. It downloads prebuilt binaries from `wr-gdal-async-prebuilt`, publishes sub-packages `@kristianwiklund/wr-gdal-linux-x64` and `@kristianwiklund/wr-gdal-linux-arm64` (versioned at the gdal-async version), runs tests, then publishes `signalk-weather-routing`.
+6. The publish workflow fires automatically. It downloads prebuilt binaries from `wr-gdal-async-prebuilt`, publishes sub-packages `@kristianwiklund/wr-gdal-linux-x64` and `@kristianwiklund/wr-gdal-linux-arm64` (versioned at the gdal-async version), runs tests, then publishes `signalk-wayfinder`.
 
 The repository must have an `NPM_TOKEN` secret configured in GitHub → Settings → Secrets and variables → Actions.
