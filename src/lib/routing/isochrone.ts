@@ -15,7 +15,15 @@ import { nearestIdx } from '../windprovider';
 import { interpolateBoatSpeed } from '../polar';
 import { segmentCrossesLandFast, isPointOnLand } from '../landmask';
 import { segmentCrossesRegion, isPointInRegion } from '../regions';
-import { haversineNM, bearingTo, destinationPoint, windSpeedKnots, windDirection, DEG_TO_RAD } from '../geo';
+import {
+  haversineNM,
+  bearingTo,
+  destinationPoint,
+  windSpeedKnots,
+  windDirection,
+  trueWindAngle,
+  DEG_TO_RAD,
+} from '../geo';
 
 const DEFAULT_HEADING_STEP = 5;
 const DEFAULT_SECTOR_SIZE = 1;
@@ -234,8 +242,7 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
             if (delta > maxHeadingChangeDeg) continue;
           }
 
-          let twa = (hdg - wdir + 360) % 360;
-          if (twa > 180) twa = 360 - twa;
+          const twa = trueWindAngle(hdg, wdir);
 
           const polarSpeed = interpolateBoatSpeed(polar, twa, tws);
           // REQ-84: motor fires when polarSpeed < motorBelowKn threshold.
@@ -508,15 +515,16 @@ function backtrack(
     // current step — one position and one time step earlier. Resampling
     // gives the actual wind at the displayed waypoint position.
     const resampled = wind.getWind(cur.lat, cur.lon, nearestIdx(wind.times, cur.time));
+    const resampledWindDir = windDirection(resampled.u, resampled.v);
     route.unshift({
       lat: cur.lat,
       lon: cur.lon,
       time: cur.time,
       heading: cur.heading,
-      twa: cur.twa,
+      twa: cur.parent === undefined ? 0 : trueWindAngle(cur.heading, resampledWindDir),
       tws: windSpeedKnots(resampled.u, resampled.v),
       boatSpeed: cur.boatSpeed,
-      windDir: windDirection(resampled.u, resampled.v),
+      windDir: resampledWindDir,
       legCalcMs: cur.stepCalcMs,
       waveHeight: wind.getWave(cur.lat, cur.lon, cur.time),
       gribFilePath: cur.gribFilePath,

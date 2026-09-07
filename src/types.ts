@@ -162,6 +162,25 @@ export interface CalculationStatus {
   error?: string;
   warning?: string;
   frontier?: Array<[number, number]>; // [lat, lon] pairs of current isochrone frontier
+  quality?: RouteQualityReport;
+}
+
+export interface RouteQualityIssue {
+  code: string;
+  severity: 'error' | 'warning';
+  message: string;
+}
+
+export interface RouteQualityReport {
+  valid: boolean;
+  issues: RouteQualityIssue[];
+  metrics: {
+    pointCount: number;
+    totalDistanceNm: number;
+    maxWindShiftDeg: number;
+    maxTwaErrorDeg: number;
+    maxForecastLeadHours: number | null;
+  };
 }
 
 export interface GribInfoResponse {
@@ -184,6 +203,7 @@ export interface PluginSettings {
   coneDisableLookaheadNm?: number;
   maxHeadingChange?: number;
   conditionsGraphHeight?: number;
+  forecastSkillHorizonHours?: number;
   avoidRegionIds?: string[];
 }
 

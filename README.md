@@ -240,7 +240,7 @@ twa/tws;6;8;10;12;14;16;20
 
 Land avoidance uses the [GSHHG](https://www.soest.hawaii.edu/pwessel/gshhg/) (Global Self-consistent Hierarchical High-resolution Geography) dataset, version 2.3.7, published by NOAA and the University of Hawaii. GSHHG is distributed under the [GNU Lesser General Public License v3](https://www.gnu.org/licenses/lgpl-3.0.html).
 
-The plugin bundles pre-built binary indices derived from the GSHHG `h` (high, ~7 km) resolution tier. If you need to regenerate the indices (e.g. to change resolution), see [DEVELOPMENT.md](DEVELOPMENT.md).
+The plugin bundles pre-built binary indices derived from the GSHHG `h` (high, approximately 1 km) resolution tier. If you need to regenerate the indices (e.g. to change resolution), see [DEVELOPMENT.md](DEVELOPMENT.md).
 
 ## Notes
 
@@ -248,3 +248,28 @@ The plugin bundles pre-built binary indices derived from the GSHHG `h` (high, ~7
 - Routing accuracy depends on polar quality and forecast accuracy
 - The algorithm cannot thread passages narrower than approximately 1 NM at typical leg lengths
 - This plugin has not been used for actual navigation; treat calculated routes as planning aids only
+
+## Route quality checks
+
+Every calculated route is checked independently before it can be saved. A route is rejected if it
+contains invalid coordinates or times, moves backward in time, does not match the requested
+endpoints, crosses the active shoreline or avoided-region index, or contains a true-wind angle that
+does not agree with its heading and re-sampled wind direction.
+
+Non-fatal confidence findings are shown with the result and stored as `wayfinderQuality` on the
+Signal K route. These include abrupt wind shifts, conditions beyond the configured forecast-skill
+horizon, wind above the polar table range, material polar-speed differences, disabled land checks,
+and the current arrival-radius time approximation. The report also records route distance, point
+count, maximum wind shift, maximum TWA error, and maximum forecast lead time.
+
+### GDAL boundary
+
+The packaged GDAL 3.12.3 runtime provides the GRIB driver that decodes GRIB1/GRIB2 raster bands,
+georeferencing, and per-band forecast metadata. Wayfinder then performs its own bilinear spatial
+interpolation and nearest-timestep selection. It does not currently interpolate wind in time.
+
+GDAL does not determine whether a forecast is meteorologically skillful, whether a polar is
+realistic, or whether a route is navigationally safe. Land avoidance comes from the separate GSHHG
+high-resolution shoreline index, not GDAL. It does not include bathymetry, charted hazards, bridge
+clearance, traffic separation schemes, tides, or under-keel clearance. The optional 0.5 NM dilated
+shoreline is a conservative geometric margin, not a substitute for those missing data.

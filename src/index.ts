@@ -20,6 +20,7 @@ import {
   CalculationStatus,
   PluginSettings,
   RoutePoint,
+  RouteQualityReport,
   LatLon,
 } from './types';
 import {
@@ -53,6 +54,7 @@ import { RoutingAlgorithm } from './lib/routing/algorithm';
 import { IsochroneAlgorithm } from './lib/routing/isochrone';
 import { wayfinderCapabilities } from './lib/capabilities';
 import { binnacleRoute, type PluginRouter } from './lib/binnacle-route-access';
+import { assessRouteQuality, routeQualityWarning } from './lib/route-quality';
 
 const ALGORITHMS: Map<string, RoutingAlgorithm> = new Map([['isochrone', new IsochroneAlgorithm()]]);
 
@@ -74,6 +76,7 @@ module.exports = (app: SignalKApp) => {
   let settings: PluginSettings | null = null;
   let calcStatus: CalculationStatus = { status: 'idle', progress: 0 };
   let pendingRoute: import('./types').RoutePoint[] | null = null;
+  let pendingRouteQuality: RouteQualityReport | null = null;
   let calculationSequence = 0;
   const sseClients = new Set<Response>();
 
@@ -281,6 +284,7 @@ module.exports = (app: SignalKApp) => {
       regionIndex = null;
       calcStatus = { status: 'idle', progress: 0 };
       pendingRoute = null;
+      pendingRouteQuality = null;
       calculationSequence += 1;
       closeSseClients();
     },
@@ -536,6 +540,7 @@ module.exports = (app: SignalKApp) => {
 
         const sequence = ++calculationSequence;
         pendingRoute = null;
+        pendingRouteQuality = null;
         calcStatus = { status: 'calculating', progress: 0 };
         res.json({ status: 'calculating' });
 
@@ -632,29 +637,48 @@ module.exports = (app: SignalKApp) => {
           }
 
           if (sequence !== calculationSequence) return;
+          const quality = assessRouteQuality(route, {
+            start,
+            ...(warning ? {} : { end }),
+            polar,
+            landIndex: activeIndex,
+            regionIndex,
+            avoidRegionIds: new Set(req.body.avoidRegionIds ?? settings?.avoidRegionIds ?? []),
+            useLandAvoidance,
+            gribFiles: loadedEntries.map((entry) => entry.meta),
+            forecastSkillHorizonHours: Number(settings?.forecastSkillHorizonHours ?? 96),
+            motorSpeedKn: Number(mergedOptions.motorSpeedKn ?? 0),
+            motorBelowKn: Number(mergedOptions.motorBelowKn ?? 0),
+          });
+          if (!quality.valid) {
+            throw new Error(
+              `Route quality checks failed: ${quality.issues
+                .filter((issue) => issue.severity === 'error')
+                .map((issue) => issue.message)
+                .join(' ')}`,
+            );
+          }
           pendingRoute = route;
+          pendingRouteQuality = quality;
+          const qualityWarning = routeQualityWarning(quality);
           const loadWarning =
             calcFailedFiles.length > 0
               ? `${calcFailedFiles.length} GRIB file(s) failed to load: ${calcFailedFiles.map((f) => f.path.split('/').pop()).join(', ')}`
               : undefined;
-          if (warning) {
+          const combinedWarning = [warning, loadWarning, qualityWarning].filter(Boolean).join('; ') || undefined;
+          if (combinedWarning) {
             calcStatus = {
               status: 'warning',
               progress: 100,
-              warning: loadWarning ? `${warning}; ${loadWarning}` : warning,
+              warning: combinedWarning,
+              quality,
             };
-            app.setPluginStatus(`Partial route: ${route.length} waypoints`);
+            app.setPluginStatus(
+              `${warning ? 'Partial route' : 'Route ready'}: ${route.length} waypoints (quality warning)`,
+            );
             pushSse({ type: 'warning', warning: calcStatus.warning });
-          } else if (loadWarning) {
-            calcStatus = {
-              status: 'warning',
-              progress: 100,
-              warning: loadWarning,
-            };
-            app.setPluginStatus(`Route ready: ${route.length} waypoints (${loadWarning})`);
-            pushSse({ type: 'warning', warning: loadWarning });
           } else {
-            calcStatus = { status: 'done', progress: 100 };
+            calcStatus = { status: 'done', progress: 100, quality };
             app.setPluginStatus(`Route ready: ${route.length} waypoints`);
             pushSse({ type: 'done' });
           }
@@ -687,6 +711,7 @@ module.exports = (app: SignalKApp) => {
         const wasCalculating = calcStatus.status === 'calculating';
         calculationSequence += 1;
         pendingRoute = null;
+        pendingRouteQuality = null;
         calcStatus = { status: 'idle', progress: 0 };
         closeSseClients();
         res.json({ cancelled: wasCalculating });
@@ -1003,6 +1028,7 @@ module.exports = (app: SignalKApp) => {
                 ...(p.waveHeight !== undefined ? { waveHeight: Math.round(p.waveHeight * 100) / 100 } : {}),
                 ...(p.gribFilePath !== undefined ? { gribFile: p.gribFilePath } : {}),
               })),
+              wayfinderQuality: pendingRouteQuality,
             },
           },
         });
@@ -1012,7 +1038,7 @@ module.exports = (app: SignalKApp) => {
         if (!pendingRoute) return void res.status(404).json({ error: 'No pending route to save' });
         const name: string = req.body?.name?.trim() || `Weather Route ${new Date().toLocaleString()}`;
         try {
-          const routeId = await saveRoute(app, pendingRoute, name);
+          const routeId = await saveRoute(app, pendingRoute, name, pendingRouteQuality ?? undefined);
           res.json({ routeId });
         } catch (e: any) {
           res.status(500).json({ error: e.message });

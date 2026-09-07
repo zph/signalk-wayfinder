@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { haversineNM, bearingTo, destinationPoint, windSpeedKnots, windDirection } from '../geo';
+import { haversineNM, bearingTo, destinationPoint, windSpeedKnots, windDirection, trueWindAngle } from '../geo';
 
 const EPSILON = 0.01; // 0.01 nm / 0.01 deg tolerance
 
@@ -73,4 +73,10 @@ test('windDirection: southerly (blowing from south, u=0 v=5)', () => {
 test('windDirection: westerly (blowing from west, u=5 v=0)', () => {
   const dir = windDirection(5, 0);
   assert.ok(Math.abs(dir - 270) < EPSILON, `expected 270°, got ${dir}`);
+});
+
+test('trueWindAngle: returns the smallest angle across north', () => {
+  assert.equal(trueWindAngle(10, 350), 20);
+  assert.equal(trueWindAngle(350, 10), 20);
+  assert.equal(trueWindAngle(90, 270), 180);
 });

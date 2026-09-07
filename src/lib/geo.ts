@@ -51,3 +51,9 @@ export function windSpeedKnots(u: number, v: number): number {
 export function windDirection(u: number, v: number): number {
   return (Math.atan2(-u, -v) * RAD_TO_DEG + 360) % 360;
 }
+
+// Smallest angle between a vessel heading and meteorological wind direction.
+export function trueWindAngle(heading: number, windDir: number): number {
+  const angle = (((heading - windDir) % 360) + 360) % 360;
+  return angle > 180 ? 360 - angle : angle;
+}

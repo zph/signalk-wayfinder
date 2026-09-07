@@ -1,10 +1,15 @@
 // Saves a computed route to SignalK resources/routes as a GeoJSON Feature.
 
-import { RoutePoint } from '../types';
+import { RoutePoint, RouteQualityReport } from '../types';
 import { haversineNM } from './geo';
 import { SignalKApp } from './signalk-app';
 
-export async function saveRoute(app: SignalKApp, route: RoutePoint[], name: string): Promise<string> {
+export async function saveRoute(
+  app: SignalKApp,
+  route: RoutePoint[],
+  name: string,
+  quality?: RouteQualityReport,
+): Promise<string> {
   const uuid = crypto.randomUUID();
 
   const totalDistNM = route.slice(1).reduce((sum, p, i) => {
@@ -35,6 +40,7 @@ export async function saveRoute(app: SignalKApp, route: RoutePoint[], name: stri
           ...(p.waveHeight !== undefined ? { waveHeight: Math.round(p.waveHeight * 100) / 100 } : {}),
           ...(p.gribFilePath !== undefined ? { gribFile: p.gribFilePath } : {}),
         })),
+        ...(quality ? { wayfinderQuality: quality } : {}),
       },
     },
   };
