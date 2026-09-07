@@ -8,6 +8,7 @@ import {
   PolarData,
   CalculationRequest,
   IsochronePoint,
+  NavigationSafetyContext,
   RoutePoint,
 } from '../../types';
 import { RoutingAlgorithm } from './algorithm';
@@ -25,6 +26,7 @@ import {
   DEG_TO_RAD,
 } from '../geo';
 import { advanceUnderwayBudget, isLegInDaylight, solarElevationDeg } from '../passage-constraints';
+import { navigationConstraintViolation, type NavigationConstraints } from '../navigation-safety';
 
 const DEFAULT_HEADING_STEP = 5;
 const DEFAULT_SECTOR_SIZE = 1;
@@ -90,7 +92,7 @@ function logTimingSummary(timings: StepTiming[]): void {
   console.log(`[isochrone] summary over ${timings.length} steps:\n${lines.join('\n')}`);
 }
 
-type FailureReason = 'land' | 'wind' | 'grib_exhausted';
+type FailureReason = 'land' | 'wind' | 'grib_exhausted' | 'safety';
 
 // Structured routing failure — carries a machine-readable reason so the frontend
 // can show the sailor a specific diagnostic rather than a generic error string.
@@ -117,6 +119,7 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
     request: CalculationRequest,
     onProgress: (pct: number, frontier: Array<[number, number]>) => void,
     options?: Record<string, unknown>,
+    navigationSafety?: NavigationSafetyContext,
   ): Promise<{ route: RoutePoint[]; warning?: string }> {
     const headingStep = Number(options?.headingStep ?? DEFAULT_HEADING_STEP);
     const sectorSize = Number(options?.sectorSize ?? DEFAULT_SECTOR_SIZE);
@@ -133,6 +136,11 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
     const configuredConeHalfAngle = Number(options?.coneHalfAngle ?? FINE_PASS_CONE_HALF_ANGLE);
     const coneDisableLookaheadNm = Number(options?.coneDisableLookaheadNm ?? CONE_DISABLE_LOOKAHEAD_NM);
     const maxHeadingChangeDeg = Number(options?.maxHeadingChange ?? MAX_HEADING_CHANGE);
+    const navigationConstraints: NavigationConstraints = {
+      minimumDepthM: Number(options?.minimumDepthM ?? 0),
+      minimumShoreDistanceNm: Number(options?.minimumShoreDistanceNm ?? 0),
+      maximumOffshoreDistanceNm: Number(options?.maximumOffshoreDistanceNm ?? 0),
+    };
 
     const { start, end } = request;
     const departureTime = new Date(request.departureTime);
@@ -177,6 +185,7 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
     let lastRejectedByLand = 0;
     let lastRejectedByPolar = 0;
     let lastRejectedByGrib = 0;
+    let lastRejectedBySafety = 0;
 
     for (let step = startTimeIdx; step < wind.times.length - 1; step++) {
       const stepStart = performance.now();
@@ -191,6 +200,7 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
       let rejectedByPolar = 0;
       let rejectedByLand = 0;
       let rejectedByGrib = 0;
+      let rejectedBySafety = 0;
       let coneDisabledCount = 0;
 
       const t0frontier = performance.now();
@@ -345,6 +355,20 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
             }
           }
           if (
+            navigationConstraintViolation(
+              navigationSafety?.shorelineIndex ?? null,
+              navigationSafety?.depthProvider ?? null,
+              navigationConstraints,
+              point.lat,
+              point.lon,
+              newLat,
+              newLon,
+            )
+          ) {
+            rejectedBySafety++;
+            continue;
+          }
+          if (
             regionIndex &&
             avoidIds.size > 0 &&
             segmentCrossesRegion(regionIndex, avoidIds, point.lat, point.lon, newLat, newLon)
@@ -372,7 +396,22 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
 
           const distToEnd = haversineNM(newLat, newLon, end.lat, end.lon);
           if (distToEnd <= arrivalRadiusNm) {
-            if (!arrived || distToEnd < haversineNM(arrived.lat, arrived.lon, end.lat, end.lon)) {
+            const arrivalBlockedByLand =
+              edgeIndex !== null && segmentCrossesLandFast(edgeIndex, newLat, newLon, end.lat, end.lon);
+            const arrivalSafetyViolation = navigationConstraintViolation(
+              navigationSafety?.shorelineIndex ?? null,
+              navigationSafety?.depthProvider ?? null,
+              navigationConstraints,
+              newLat,
+              newLon,
+              end.lat,
+              end.lon,
+            );
+            if (
+              !arrivalBlockedByLand &&
+              !arrivalSafetyViolation &&
+              (!arrived || distToEnd < haversineNM(arrived.lat, arrived.lon, end.lat, end.lon))
+            ) {
               arrived = newPoint;
             }
           }
@@ -391,6 +430,7 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
       lastRejectedByLand = rejectedByLand;
       lastRejectedByPolar = rejectedByPolar;
       lastRejectedByGrib = rejectedByGrib;
+      lastRejectedBySafety = rejectedBySafety;
 
       const t0prune = performance.now();
       isochrone = pruneToFrontier(candidates, start.lat, start.lon, sectorSize);
@@ -400,18 +440,24 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
 
       if (isochrone.length === 0) {
         const reason: FailureReason =
-          lastRejectedByGrib > lastRejectedByLand && lastRejectedByGrib > lastRejectedByPolar
-            ? 'grib_exhausted'
-            : lastRejectedByLand > lastRejectedByPolar
-              ? 'land'
-              : 'wind';
+          lastRejectedBySafety > lastRejectedByGrib &&
+          lastRejectedBySafety > lastRejectedByLand &&
+          lastRejectedBySafety > lastRejectedByPolar
+            ? 'safety'
+            : lastRejectedByGrib > lastRejectedByLand && lastRejectedByGrib > lastRejectedByPolar
+              ? 'grib_exhausted'
+              : lastRejectedByLand > lastRejectedByPolar
+                ? 'land'
+                : 'wind';
         const reasonText = (r: FailureReason) =>
           r === 'land'
             ? 'land blocks all paths'
-            : r === 'grib_exhausted'
-              ? 'frontier reached GRIB boundary'
-              : 'wind too adverse or light';
-        const counts = `(land: ${lastRejectedByLand}, wind: ${lastRejectedByPolar}, grib: ${lastRejectedByGrib})`;
+            : r === 'safety'
+              ? 'navigation safety constraints block all paths'
+              : r === 'grib_exhausted'
+                ? 'frontier reached GRIB boundary'
+                : 'wind too adverse or light';
+        const counts = `(land: ${lastRejectedByLand}, safety: ${lastRejectedBySafety}, wind: ${lastRejectedByPolar}, grib: ${lastRejectedByGrib})`;
         if (lastFrontier !== null) {
           const closest = closestTo(lastFrontier, end);
           const dist = Math.round(haversineNM(closest.lat, closest.lon, end.lat, end.lon));

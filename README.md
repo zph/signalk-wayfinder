@@ -3,7 +3,7 @@
 > [!CAUTION]
 > ⚠️ **Experimental — read before use.** ⚠️
 >
-> - Calculated routes have not been validated by sailing them and **may cross land or shallow water**.
+> - Calculated routes have not been validated by sailing them. Verify every route against current official charts and notices.
 > - Weather forecasts change. The route calculated now may not reflect conditions at departure time. Always obtain up-to-date forecasts and check for NOTAMs and local hazards.
 > - This plugin **does not replace good seamanship**, a qualified navigator, or certified navigation software. Use is entirely at your own risk.
 
@@ -65,17 +65,33 @@ Open **Server → Plugin Config → Sail Wayfinder** in the SignalK admin UI.
 
 The defaults work well for most use cases.
 
-| Setting                  | Default | Description                                                                                                                                                                                                                           |
-| ------------------------ | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `headingStep`            | 5°      | Angular resolution when evaluating candidate headings. Lower values produce more accurate routes at the cost of longer calculation time.                                                                                              |
-| `sectorSize`             | 1°      | Bearing sector width for frontier pruning. After each timestep the top 2 candidates per sector are kept.                                                                                                                              |
-| `minBoatSpeed`           | 0.3 kn  | Headings producing less than this effective speed are discarded. Prevents near-stationary drift being treated as a viable route.                                                                                                      |
-| `arrivalRadiusNm`        | 2 NM    | Distance from the destination at which the route is considered complete.                                                                                                                                                              |
-| `coneHalfAngle`          | 100°    | Half-angle of the directional cone applied when the straight-line path to the destination is clear of land. Headings outside this cone are not evaluated. Disabled automatically per frontier point when land blocks the direct path. |
-| `coneDisableLookaheadNm` | 100 NM  | How far ahead to check for land when deciding whether to disable the cone for a given frontier point.                                                                                                                                 |
-| `maxHeadingChange`       | 120°    | Maximum course change allowed between consecutive timesteps, preventing unrealistic zig-zagging.                                                                                                                                      |
-| `daylightOnly`           | false   | Holds position during forecast steps that are not fully in daylight at the route location.                                                                                                                                            |
-| `maxHoursPerDay`         | 0 h     | Maximum underway time in each 24-hour passage day, anchored to departure time. Set to 0 for unlimited.                                                                                                                                |
+| Setting                     | Default | Description                                                                                                                                                                                                                           |
+| --------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `headingStep`               | 5°      | Angular resolution when evaluating candidate headings. Lower values produce more accurate routes at the cost of longer calculation time.                                                                                              |
+| `sectorSize`                | 1°      | Bearing sector width for frontier pruning. After each timestep the top 2 candidates per sector are kept.                                                                                                                              |
+| `minBoatSpeed`              | 0.3 kn  | Headings producing less than this effective speed are discarded. Prevents near-stationary drift being treated as a viable route.                                                                                                      |
+| `arrivalRadiusNm`           | 2 NM    | Distance from the destination at which the route is considered complete.                                                                                                                                                              |
+| `coneHalfAngle`             | 100°    | Half-angle of the directional cone applied when the straight-line path to the destination is clear of land. Headings outside this cone are not evaluated. Disabled automatically per frontier point when land blocks the direct path. |
+| `coneDisableLookaheadNm`    | 100 NM  | How far ahead to check for land when deciding whether to disable the cone for a given frontier point.                                                                                                                                 |
+| `maxHeadingChange`          | 120°    | Maximum course change allowed between consecutive timesteps, preventing unrealistic zig-zagging.                                                                                                                                      |
+| `daylightOnly`              | false   | Holds position during forecast steps that are not fully in daylight at the route location.                                                                                                                                            |
+| `maxHoursPerDay`            | 0 h     | Maximum underway time in each 24-hour passage day, anchored to departure time. Set to 0 for unlimited.                                                                                                                                |
+| `minimumDepthM`             | 0 m     | Minimum numeric raster depth along every route leg. Missing raster coverage is rejected. Set to 0 to disable.                                                                                                                         |
+| `minimumShoreDistanceNm`    | 0 NM    | Minimum clearance from the configured GSHHG shoreline. Set to 0 to disable.                                                                                                                                                           |
+| `maximumOffshoreDistanceNm` | 0 NM    | Maximum distance from the configured GSHHG shoreline along the full route. Set to 0 to disable.                                                                                                                                       |
+
+### Bathymetry safety input
+
+Set `bathymetryPath` to a local, georeferenced raster that GDAL can read. GeoTIFF, Cloud Optimized
+GeoTIFF, BAG, S-102, NetCDF, and several other raster drivers are included in the Linux container
+runtime. Set `bathymetryValueConvention` to `elevation` for negative values below chart datum, or
+`depth` for positive values below chart datum. `bathymetryBand` selects the one-based data band.
+
+The minimum-depth constraint is fail closed. Every raster cell touched by the route line must have a
+finite value. A missing cell, a position outside the raster, land elevation in an elevation raster,
+or an unreadable source rejects the constrained route. The configured raster datum must match the
+depth assumption you intend to use. Wayfinder does not add tide height, vessel draft, or an
+under-keel-clearance allowance.
 
 ### Display settings
 
@@ -260,14 +276,16 @@ The plugin bundles pre-built binary indices derived from the GSHHG `h` (high, ap
 
 Every calculated route is checked independently before it can be saved. A route is rejected if it
 contains invalid coordinates or times, moves backward in time, does not match the requested
-endpoints, crosses the active shoreline or avoided-region index, or contains a true-wind angle that
-does not agree with its heading and re-sampled wind direction.
+endpoints, crosses the active shoreline or avoided-region index, violates a configured depth or
+shore-distance constraint, or contains a true-wind angle that does not agree with its heading and
+re-sampled wind direction.
 
 Non-fatal confidence findings are shown with the result and stored as `wayfinderQuality` on the
 Signal K route. These include abrupt wind shifts, conditions beyond the configured forecast-skill
 horizon, wind above the polar table range, material polar-speed differences, disabled land checks,
 and the current arrival-radius time approximation. The report also records route distance, point
-count, maximum wind shift, maximum TWA error, and maximum forecast lead time.
+count, maximum wind shift, maximum TWA error, maximum forecast lead time, and the minimum observed
+raster depth when depth checking is active.
 
 ### GDAL boundary
 
@@ -276,7 +294,10 @@ georeferencing, and per-band forecast metadata. Wayfinder then performs its own 
 interpolation and nearest-timestep selection. It does not currently interpolate wind in time.
 
 GDAL does not determine whether a forecast is meteorologically skillful, whether a polar is
-realistic, or whether a route is navigationally safe. Land avoidance comes from the separate GSHHG
-high-resolution shoreline index, not GDAL. It does not include bathymetry, charted hazards, bridge
-clearance, traffic separation schemes, tides, or under-keel clearance. The optional 0.5 NM dilated
-shoreline is a conservative geometric margin, not a substitute for those missing data.
+realistic, or whether a route is navigationally safe. Land avoidance and shore-distance constraints
+come from the separate GSHHG high-resolution shoreline index, not GDAL. When configured, GDAL
+supplies numeric bathymetry cells from a local raster. It does not decide whether the raster is
+current or authoritative, and Wayfinder still does not model charted hazards, bridge clearance,
+traffic separation schemes, tides, or under-keel clearance. The optional 0.5 NM dilated shoreline
+and configurable shoreline clearance are conservative geometric margins, not substitutes for those
+missing data.

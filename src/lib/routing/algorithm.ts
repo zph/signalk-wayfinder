@@ -7,6 +7,7 @@ import {
   RegionIndex,
   PolarData,
   CalculationRequest,
+  NavigationSafetyContext,
   RoutePoint,
 } from '../../types';
 
@@ -22,5 +23,6 @@ export interface RoutingAlgorithm {
     request: CalculationRequest,
     onProgress: (pct: number, frontier: Array<[number, number]>) => void,
     options?: Record<string, unknown>,
+    navigationSafety?: NavigationSafetyContext,
   ): Promise<{ route: RoutePoint[]; warning?: string }>;
 }

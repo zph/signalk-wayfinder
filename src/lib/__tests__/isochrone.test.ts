@@ -170,6 +170,38 @@ test('calculate: rejects departure time past GRIB end', async () => {
   await assert.rejects(() => algo.calculate(wind, null, polar, null, null, req, () => {}), /departure time/i);
 });
 
+test('calculate: rejects every candidate when minimum-depth coverage is missing', async () => {
+  const wind = makeWind(makeGrib());
+  const request: CalculationRequest = {
+    start: { lat: 41, lon: 11 },
+    end: { lat: 41.1, lon: 11 },
+    departureTime: '2024-01-01T00:00:00Z',
+  };
+  await assert.rejects(
+    () =>
+      algo.calculate(
+        wind,
+        null,
+        makePolar(),
+        null,
+        null,
+        request,
+        () => {},
+        { minimumDepthM: 2, arrivalRadiusNm: 1 },
+        {
+          shorelineIndex: null,
+          depthProvider: {
+            source: 'test',
+            depthAt: () => undefined,
+            minimumDepthAlongSegment: () => undefined,
+            close() {},
+          },
+        },
+      ),
+    /navigation safety constraints/i,
+  );
+});
+
 test('calculate: arrives when destination is within arrival radius', async () => {
   const wind = makeWind(makeGrib());
   const polar = makePolar();

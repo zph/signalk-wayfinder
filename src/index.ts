@@ -22,6 +22,7 @@ import {
   RoutePoint,
   RouteQualityReport,
   LatLon,
+  DepthProvider,
 } from './types';
 import {
   loadGrib,
@@ -55,6 +56,8 @@ import { IsochroneAlgorithm } from './lib/routing/isochrone';
 import { wayfinderCapabilities } from './lib/capabilities';
 import { binnacleRoute, type PluginRouter } from './lib/binnacle-route-access';
 import { assessRouteQuality, routeQualityWarning } from './lib/route-quality';
+import { loadGdalBathymetry } from './lib/gdal-bathymetry';
+import { navigationConstraintViolation, type NavigationConstraints } from './lib/navigation-safety';
 
 const ALGORITHMS: Map<string, RoutingAlgorithm> = new Map([['isochrone', new IsochroneAlgorithm()]]);
 
@@ -73,6 +76,7 @@ module.exports = (app: SignalKApp) => {
   let dilatedIndexReady = false;
   let hiresActive = false;
   let regionIndex: RegionIndex | null = null;
+  let depthProvider: DepthProvider | null = null;
   let settings: PluginSettings | null = null;
   let calcStatus: CalculationStatus = { status: 'idle', progress: 0 };
   let pendingRoute: import('./types').RoutePoint[] | null = null;
@@ -102,6 +106,7 @@ module.exports = (app: SignalKApp) => {
     if (currentFiles.length > 0) parts.push(`${currentFiles.length} current GRIB file(s)`);
     if (polar) parts.push('polar loaded');
     if (edgeIndex) parts.push(`land index: ${edgeIndex.edgeGrid.size} cells`);
+    if (depthProvider) parts.push(`bathymetry: ${nodepath.basename(depthProvider.source)}`);
     if (gribFailedFiles.length > 0) parts.push(`${gribFailedFiles.length} file(s) failed to index`);
     app.setPluginStatus(parts.join(' · '));
   }
@@ -191,6 +196,7 @@ module.exports = (app: SignalKApp) => {
         regionIndex = null;
         return;
       }
+
       const apiRegions = await app.resourcesApi.listResources('regions');
       regionIndex = buildRegionIndex(apiRegions);
     } catch (e: any) {
@@ -258,6 +264,20 @@ module.exports = (app: SignalKApp) => {
         return;
       }
 
+      if (cfg.bathymetryPath) {
+        try {
+          app.setPluginStatus('Loading bathymetry data...');
+          depthProvider = await loadGdalBathymetry(
+            cfg.bathymetryPath,
+            cfg.bathymetryBand ?? 1,
+            cfg.bathymetryValueConvention ?? 'elevation',
+          );
+        } catch (e: any) {
+          app.setPluginError(`Failed to load bathymetry data: ${e.message}`);
+          return;
+        }
+      }
+
       if (!cfg.gribDir) {
         app.setPluginStatus('No GRIB directory configured — set gribDir in plugin settings');
         return;
@@ -282,6 +302,8 @@ module.exports = (app: SignalKApp) => {
       dilatedEdgeIndex = null;
       dilatedIndexReady = false;
       regionIndex = null;
+      depthProvider?.close();
+      depthProvider = null;
       calcStatus = { status: 'idle', progress: 0 };
       pendingRoute = null;
       pendingRouteQuality = null;
@@ -382,6 +404,51 @@ module.exports = (app: SignalKApp) => {
           minimum: 0,
           maximum: 24,
         },
+        bathymetryPath: {
+          type: 'string',
+          title: 'Bathymetry raster path',
+          description:
+            'Optional local path to a GDAL-readable raster with complete numeric depth coverage for constrained routes.',
+        },
+        bathymetryBand: {
+          type: 'integer',
+          title: 'Bathymetry raster band',
+          description: 'One-based raster band containing elevation or depth values.',
+          default: 1,
+          minimum: 1,
+        },
+        bathymetryValueConvention: {
+          type: 'string',
+          title: 'Bathymetry value convention',
+          description:
+            'Elevation uses negative values below chart datum. Depth uses positive values below chart datum.',
+          default: 'elevation',
+          enum: ['elevation', 'depth'],
+        },
+        minimumDepthM: {
+          type: 'number',
+          title: 'Minimum charted depth (m)',
+          description: 'Reject route legs with shallower values or missing bathymetry coverage. Set to 0 to disable.',
+          default: 0,
+          minimum: 0,
+          maximum: 12000,
+        },
+        minimumShoreDistanceNm: {
+          type: 'number',
+          title: 'Minimum shoreline clearance (NM)',
+          description: 'Reject route legs that pass closer to the GSHHG shoreline. Set to 0 to disable.',
+          default: 0,
+          minimum: 0,
+          maximum: 50,
+        },
+        maximumOffshoreDistanceNm: {
+          type: 'number',
+          title: 'Maximum distance offshore (NM)',
+          description: 'Keep the full route within this distance of the GSHHG shoreline. Set to 0 to disable.',
+          default: 0,
+          minimum: 0,
+          maximum: 1000,
+        },
         waveOverlayMaxM: {
           type: 'number',
           title: 'Wave overlay max (m)',
@@ -427,6 +494,7 @@ module.exports = (app: SignalKApp) => {
             hasPolar: polar !== null,
             hasForecast: gribFiles.length > 0,
             hasShoreline: edgeIndex !== null,
+            depthSource: depthProvider ? nodepath.basename(depthProvider.source) : undefined,
           }),
         );
       });
@@ -456,6 +524,9 @@ module.exports = (app: SignalKApp) => {
           maxHeadingChange: settings?.maxHeadingChange,
           daylightOnly: settings?.daylightOnly,
           maxHoursPerDay: settings?.maxHoursPerDay,
+          minimumDepthM: settings?.minimumDepthM,
+          minimumShoreDistanceNm: settings?.minimumShoreDistanceNm,
+          maximumOffshoreDistanceNm: settings?.maximumOffshoreDistanceNm,
           ...options,
         };
         const inputValidation = validateCalculateInput({
@@ -480,6 +551,47 @@ module.exports = (app: SignalKApp) => {
           return void res.status(503).json({ error: 'Safety margin index not ready yet' });
         }
         const activeIndex = !useLandAvoidance ? null : useSafetyMargin ? dilatedEdgeIndex : edgeIndex;
+        const navigationConstraints: NavigationConstraints = {
+          minimumDepthM: Number(mergedOptions.minimumDepthM ?? 0),
+          minimumShoreDistanceNm: Number(mergedOptions.minimumShoreDistanceNm ?? 0),
+          maximumOffshoreDistanceNm: Number(mergedOptions.maximumOffshoreDistanceNm ?? 0),
+        };
+        if (navigationConstraints.minimumDepthM > 0 && !depthProvider) {
+          return void res.status(503).json({
+            error: 'Minimum depth requires a configured, readable bathymetry raster',
+          });
+        }
+        if (
+          (navigationConstraints.minimumShoreDistanceNm > 0 || navigationConstraints.maximumOffshoreDistanceNm > 0) &&
+          !edgeIndex
+        ) {
+          return void res.status(503).json({ error: 'Shoreline distance constraints require the shoreline index' });
+        }
+
+        const endpointViolation = (point: LatLon): ReturnType<typeof navigationConstraintViolation> =>
+          navigationConstraintViolation(
+            edgeIndex,
+            depthProvider,
+            navigationConstraints,
+            point.lat,
+            point.lon,
+            point.lat,
+            point.lon,
+          );
+        const violationMessage = (
+          label: string,
+          violation: NonNullable<ReturnType<typeof endpointViolation>>,
+        ): string => {
+          if (violation === 'depth-unavailable') return `${label} has no bathymetry coverage`;
+          if (violation === 'too-shallow') return `${label} is shallower than the configured minimum depth`;
+          if (violation === 'too-close-to-shore') return `${label} is closer than the configured shoreline clearance`;
+          return `${label} is farther offshore than the configured maximum`;
+        };
+        const startViolation = endpointViolation(start);
+        if (startViolation)
+          return void res.status(400).json({ error: violationMessage('Start point', startViolation) });
+        const endViolation = endpointViolation(end);
+        if (endViolation) return void res.status(400).json({ error: violationMessage('Destination', endViolation) });
 
         if (useLandAvoidance && activeIndex) {
           if (isPointOnLand(activeIndex, start.lat, start.lon))
@@ -554,6 +666,9 @@ module.exports = (app: SignalKApp) => {
             return void res.status(400).json({
               error: `Waypoint ${i + 1} is outside the GRIB coverage area — load a GRIB file covering all waypoints`,
             });
+          const waypointViolation = endpointViolation(wp);
+          if (waypointViolation)
+            return void res.status(400).json({ error: violationMessage(`Waypoint ${i + 1}`, waypointViolation) });
         }
 
         const sequence = ++calculationSequence;
@@ -604,6 +719,7 @@ module.exports = (app: SignalKApp) => {
                 pushSse({ type: 'progress', progress: pct, frontier });
               },
               mergedOptions,
+              { shorelineIndex: edgeIndex, depthProvider },
             );
             route = result.route;
             warning = result.warning;
@@ -643,6 +759,7 @@ module.exports = (app: SignalKApp) => {
                   pushSse({ type: 'progress', progress: mapped, frontier });
                 },
                 mergedOptions,
+                { shorelineIndex: edgeIndex, depthProvider },
               );
 
               if (segResult.warning) warnings.push(`Leg ${i + 1}: ${segResult.warning}`);
@@ -660,6 +777,7 @@ module.exports = (app: SignalKApp) => {
             ...(warning ? {} : { end }),
             polar,
             landIndex: activeIndex,
+            shorelineIndex: edgeIndex,
             regionIndex,
             avoidRegionIds: new Set(req.body.avoidRegionIds ?? settings?.avoidRegionIds ?? []),
             useLandAvoidance,
@@ -669,6 +787,8 @@ module.exports = (app: SignalKApp) => {
             motorBelowKn: Number(mergedOptions.motorBelowKn ?? 0),
             daylightOnly: Boolean(mergedOptions.daylightOnly ?? false),
             maxHoursPerDay: Number(mergedOptions.maxHoursPerDay ?? 0),
+            depthProvider,
+            navigationConstraints,
           });
           if (!quality.valid) {
             throw new Error(

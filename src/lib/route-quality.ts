@@ -2,6 +2,7 @@
 
 import {
   GribFileMeta,
+  DepthProvider,
   LandEdgeIndex,
   PolarData,
   RegionIndex,
@@ -14,6 +15,7 @@ import { interpolateBoatSpeed } from './polar';
 import { isPointOnLand, segmentCrossesLandFast } from './landmask';
 import { isPointInRegion, segmentCrossesRegion } from './regions';
 import { advanceUnderwayBudget, isLegInDaylight } from './passage-constraints';
+import { navigationConstraintViolation, type NavigationConstraints } from './navigation-safety';
 
 const ENDPOINT_TOLERANCE_NM = 0.1;
 const TWA_TOLERANCE_DEG = 1;
@@ -24,6 +26,7 @@ export interface RouteQualityContext {
   end?: { lat: number; lon: number };
   polar: PolarData;
   landIndex: LandEdgeIndex | null;
+  shorelineIndex: LandEdgeIndex | null;
   regionIndex: RegionIndex | null;
   avoidRegionIds: Set<string>;
   useLandAvoidance: boolean;
@@ -33,6 +36,8 @@ export interface RouteQualityContext {
   motorBelowKn: number;
   daylightOnly: boolean;
   maxHoursPerDay: number;
+  depthProvider: DepthProvider | null;
+  navigationConstraints: NavigationConstraints;
 }
 
 function angularDifference(a: number, b: number): number {
@@ -67,6 +72,7 @@ export function assessRouteQuality(route: RoutePoint[], context: RouteQualityCon
   let underwayHours = 0;
   let budgetDayIndex = 0;
   let underwayHoursToday = 0;
+  let minimumObservedDepthM: number | null = null;
 
   if (route.length < 2) add('too-few-points', 'error', 'Route has fewer than two points.');
 
@@ -107,6 +113,35 @@ export function assessRouteQuality(route: RoutePoint[], context: RouteQualityCon
     const previous = route[i - 1];
     const legDistanceNm = haversineNM(previous.lat, previous.lon, point.lat, point.lon);
     totalDistanceNm += legDistanceNm;
+    const safetyViolation = navigationConstraintViolation(
+      context.shorelineIndex,
+      context.depthProvider,
+      context.navigationConstraints,
+      previous.lat,
+      previous.lon,
+      point.lat,
+      point.lon,
+    );
+    if (safetyViolation === 'depth-unavailable') {
+      add('depth-coverage-missing', 'error', `Route leg ${i} has no numeric bathymetry coverage.`);
+    } else if (safetyViolation === 'too-shallow') {
+      add('minimum-depth-violated', 'error', `Route leg ${i} is shallower than the configured minimum depth.`);
+    } else if (safetyViolation === 'too-close-to-shore') {
+      add('shore-clearance-violated', 'error', `Route leg ${i} is closer than the configured shoreline clearance.`);
+    } else if (safetyViolation === 'too-far-offshore') {
+      add('offshore-limit-violated', 'error', `Route leg ${i} is farther offshore than the configured maximum.`);
+    }
+    if (context.navigationConstraints.minimumDepthM > 0 && context.depthProvider) {
+      const legMinimum = context.depthProvider.minimumDepthAlongSegment(
+        previous.lat,
+        previous.lon,
+        point.lat,
+        point.lon,
+      );
+      if (legMinimum !== undefined) {
+        minimumObservedDepthM = Math.min(minimumObservedDepthM ?? legMinimum, legMinimum);
+      }
+    }
     const elapsedMs = point.time.getTime() - previous.time.getTime();
     if (elapsedMs < 0) add('time-reversal', 'error', `Route time moves backward on leg ${i}.`);
     if (elapsedMs === 0 && legDistanceNm > 0.01) {
@@ -255,6 +290,7 @@ export function assessRouteQuality(route: RoutePoint[], context: RouteQualityCon
       maxForecastLeadHours,
       underwayHours,
       passageDays: route.length > 0 ? budgetDayIndex + 1 : 0,
+      minimumObservedDepthM,
     },
   };
 }

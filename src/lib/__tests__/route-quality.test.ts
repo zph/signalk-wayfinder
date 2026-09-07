@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { LandPolygon, PolarData, RoutePoint } from '../../types';
+import { DepthProvider, LandPolygon, PolarData, RoutePoint } from '../../types';
 import { buildLandEdgeIndex } from '../landmask';
 import { assessRouteQuality, RouteQualityContext } from '../route-quality';
 
@@ -37,6 +37,7 @@ function context(overrides: Partial<RouteQualityContext> = {}): RouteQualityCont
     end: { lat: 58.6, lon: 19.1 },
     polar,
     landIndex: null,
+    shorelineIndex: null,
     regionIndex: null,
     avoidRegionIds: new Set(),
     useLandAvoidance: true,
@@ -62,6 +63,12 @@ function context(overrides: Partial<RouteQualityContext> = {}): RouteQualityCont
     motorBelowKn: 0,
     daylightOnly: false,
     maxHoursPerDay: 0,
+    depthProvider: null,
+    navigationConstraints: {
+      minimumDepthM: 0,
+      minimumShoreDistanceNm: 0,
+      maximumOffshoreDistanceNm: 0,
+    },
     ...overrides,
   };
 }
@@ -147,4 +154,49 @@ test('fails a route that exceeds its daily underway-hours budget', () => {
   assert.equal(report.valid, false);
   assert.ok(report.issues.some((issue) => issue.code === 'daily-hours-exceeded'));
   assert.equal(report.metrics.underwayHours, 3);
+});
+
+test('fails a route with missing numeric depth coverage', () => {
+  const depthProvider: DepthProvider = {
+    source: 'test',
+    depthAt: () => undefined,
+    minimumDepthAlongSegment: () => undefined,
+    close() {},
+  };
+  const report = assessRouteQuality(
+    validRoute(),
+    context({
+      depthProvider,
+      navigationConstraints: {
+        minimumDepthM: 2,
+        minimumShoreDistanceNm: 0,
+        maximumOffshoreDistanceNm: 0,
+      },
+    }),
+  );
+  assert.equal(report.valid, false);
+  assert.ok(report.issues.some((issue) => issue.code === 'depth-coverage-missing'));
+});
+
+test('fails a route shallower than the minimum and reports the observed depth', () => {
+  const depthProvider: DepthProvider = {
+    source: 'test',
+    depthAt: () => 1.5,
+    minimumDepthAlongSegment: () => 1.5,
+    close() {},
+  };
+  const report = assessRouteQuality(
+    validRoute(),
+    context({
+      depthProvider,
+      navigationConstraints: {
+        minimumDepthM: 2,
+        minimumShoreDistanceNm: 0,
+        maximumOffshoreDistanceNm: 0,
+      },
+    }),
+  );
+  assert.equal(report.valid, false);
+  assert.ok(report.issues.some((issue) => issue.code === 'minimum-depth-violated'));
+  assert.equal(report.metrics.minimumObservedDepthM, 1.5);
 });

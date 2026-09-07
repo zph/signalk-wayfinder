@@ -6,11 +6,27 @@ import { wayfinderCapabilities } from '../capabilities';
 
 test('reports ready only with every required planning input', () => {
   assert.deepEqual(wayfinderCapabilities({ hasPolar: true, hasForecast: true, hasShoreline: true }), {
-    apiVersion: '1.1',
+    apiVersion: '1.2',
     ready: true,
     objectives: ['fastest'],
     passageConstraints: ['daylightOnly', 'maxHoursPerDay'],
+    navigationConstraints: ['minimumShoreDistanceNm', 'maximumOffshoreDistanceNm'],
   });
+});
+
+test('advertises minimum depth only when a numeric bathymetry source is loaded', () => {
+  const capabilities = wayfinderCapabilities({
+    hasPolar: true,
+    hasForecast: true,
+    hasShoreline: true,
+    depthSource: '/charts/depth.tif',
+  });
+  assert.deepEqual(capabilities.navigationConstraints, [
+    'minimumShoreDistanceNm',
+    'maximumOffshoreDistanceNm',
+    'minimumDepthM',
+  ]);
+  assert.equal(capabilities.depthSource, '/charts/depth.tif');
 });
 
 test('explains every missing input without a safety fallback', () => {

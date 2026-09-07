@@ -65,3 +65,26 @@ test('validateCalculateInput: validates departure and passage constraint values'
     valid: true,
   });
 });
+
+test('validateCalculateInput: validates navigation safety constraint values', () => {
+  const base = {
+    start: { lat: 1, lon: 2 },
+    end: { lat: 3, lon: 4 },
+    departureTime: '2026-06-21T12:00:00Z',
+  };
+  assert.deepEqual(
+    validateCalculateInput({
+      ...base,
+      options: { minimumDepthM: 2, minimumShoreDistanceNm: 0.5, maximumOffshoreDistanceNm: 20 },
+    }),
+    { valid: true },
+  );
+  assert.deepEqual(validateCalculateInput({ ...base, options: { minimumDepthM: -1 } }), {
+    valid: false,
+    error: 'options.minimumDepthM must be between 0 and 12000',
+  });
+  assert.deepEqual(validateCalculateInput({ ...base, options: { minimumShoreDistanceNm: 51 } }), {
+    valid: false,
+    error: 'options.minimumShoreDistanceNm must be between 0 and 50',
+  });
+});

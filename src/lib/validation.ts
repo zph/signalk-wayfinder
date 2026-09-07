@@ -40,5 +40,16 @@ export function validateCalculateInput(input: CalculateInput): { valid: true } |
   ) {
     return { valid: false, error: 'options.maxHoursPerDay must be between 0 and 24' };
   }
+  const boundedOptions: Array<[string, number]> = [
+    ['minimumDepthM', 12_000],
+    ['minimumShoreDistanceNm', 50],
+    ['maximumOffshoreDistanceNm', 1_000],
+  ];
+  for (const [name, maximum] of boundedOptions) {
+    const value = routeOptions?.[name];
+    if (value !== undefined && (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > maximum)) {
+      return { valid: false, error: `options.${name} must be between 0 and ${maximum}` };
+    }
+  }
   return { valid: true };
 }

@@ -157,6 +157,18 @@ export interface CalculationRequest {
   options?: Record<string, unknown>; // per-algorithm tuning
 }
 
+export interface DepthProvider {
+  readonly source: string;
+  depthAt(lat: number, lon: number): number | undefined;
+  minimumDepthAlongSegment(lat1: number, lon1: number, lat2: number, lon2: number): number | undefined;
+  close(): void;
+}
+
+export interface NavigationSafetyContext {
+  shorelineIndex: LandEdgeIndex | null;
+  depthProvider: DepthProvider | null;
+}
+
 export interface CalculationStatus {
   status: 'idle' | 'calculating' | 'done' | 'warning' | 'error';
   progress: number; // 0–100
@@ -184,6 +196,7 @@ export interface RouteQualityReport {
     maxForecastLeadHours: number | null;
     underwayHours: number;
     passageDays: number;
+    minimumObservedDepthM: number | null;
   };
 }
 
@@ -210,6 +223,12 @@ export interface PluginSettings {
   forecastSkillHorizonHours?: number;
   daylightOnly?: boolean;
   maxHoursPerDay?: number;
+  bathymetryPath?: string;
+  bathymetryBand?: number;
+  bathymetryValueConvention?: 'elevation' | 'depth';
+  minimumDepthM?: number;
+  minimumShoreDistanceNm?: number;
+  maximumOffshoreDistanceNm?: number;
   avoidRegionIds?: string[];
 }
 
