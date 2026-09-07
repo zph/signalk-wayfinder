@@ -3,8 +3,8 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Weather Routing</title>
-    <link rel="stylesheet" href="/plugins/signalk-weather-routing/leaflet/leaflet.css" />
+    <title>Sail Wayfinder</title>
+    <link rel="stylesheet" href="/plugins/signalk-wayfinder/leaflet/leaflet.css" />
     <style>
       * {
         box-sizing: border-box;
@@ -879,9 +879,9 @@
   </head>
   <body>
     <div id="sidebar">
-      <h1>&#9973; Weather Routing</h1>
+      <h1>&#9973; Sail Wayfinder</h1>
       <a
-        href="https://github.com/kristianwiklund/signalk-weather-routing"
+        href="https://github.com/zph/signalk-wayfinder"
         target="_blank"
         rel="noopener"
         style="
@@ -1214,7 +1214,7 @@
       </div>
     </div>
 
-    <script src="/plugins/signalk-weather-routing/leaflet/leaflet.js"></script>
+    <script src="/plugins/signalk-wayfinder/leaflet/leaflet.js"></script>
     <script>
       // SignalK's helmet sets Referrer-Policy: no-referrer on the page, which strips
       // the Referer header from tile requests. The referrerpolicy attribute on <img>
@@ -1227,7 +1227,7 @@
       };
     </script>
     <script>
-      const API = '/plugins/signalk-weather-routing';
+      const API = '/plugins/signalk-wayfinder';
 
       // Escapes HTML special characters for safe insertion into innerHTML (BUG-117).
       // Also escapes quotes for safe use inside HTML attributes.

@@ -3,7 +3,7 @@
 export interface WayfinderCapabilities {
   apiVersion: '1.0';
   ready: boolean;
-  objectives: readonly ['fastest', 'leastMotoring'];
+  objectives: readonly ['fastest'];
   unavailableReason?: string;
 }
 
@@ -19,7 +19,7 @@ export function wayfinderCapabilities(inputs: {
   return {
     apiVersion: '1.0',
     ready: missing.length === 0,
-    objectives: ['fastest', 'leastMotoring'],
+    objectives: ['fastest'],
     ...(missing.length > 0
       ? { unavailableReason: `Wayfinder needs ${missing.join(', ')} before it can plan a passage.` }
       : {}),

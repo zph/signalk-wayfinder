@@ -2,7 +2,7 @@
 set -e
 
 CONTAINER="${1:-signalk-server}"
-PLUGIN_PATH="${2:-/home/node/.signalk/node_modules/signalk-weather-routing}"
+PLUGIN_PATH="${2:-/home/node/.signalk/node_modules/signalk-wayfinder}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"

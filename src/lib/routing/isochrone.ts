@@ -393,7 +393,8 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
       const frontier: Array<[number, number]> = isochrone.map((p) => [p.lat, p.lon]);
       stepsCompleted++;
       onProgress(Math.round(((step - startTimeIdx + 1) / nSteps) * 100), frontier);
-      await new Promise<void>((resolve) => setImmediate(resolve)); // yield event loop so SSE progress events are flushed to the browser
+      // Let Signal K flush progress and accept a cancellation request between forecast steps.
+      await new Promise<void>((resolve) => setImmediate(resolve));
     }
 
     logTimingSummary(stepTimings);

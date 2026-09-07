@@ -2,7 +2,7 @@
 set -euo pipefail
 
 HOST="${SIGNALK_HOST:-http://localhost:3000}"
-URL="$HOST/plugins/signalk-weather-routing/calculate"
+URL="$HOST/plugins/signalk-wayfinder/calculate"
 
 echo "Posting test run to $URL ..."
 curl -sf -X POST "$URL" \

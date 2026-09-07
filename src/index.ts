@@ -73,6 +73,7 @@ module.exports = (app: SignalKApp) => {
   let settings: PluginSettings | null = null;
   let calcStatus: CalculationStatus = { status: 'idle', progress: 0 };
   let pendingRoute: import('./types').RoutePoint[] | null = null;
+  let calculationSequence = 0;
   const sseClients = new Set<Response>();
 
   function pushSse(data: object): void {
@@ -279,6 +280,7 @@ module.exports = (app: SignalKApp) => {
       regionIndex = null;
       calcStatus = { status: 'idle', progress: 0 };
       pendingRoute = null;
+      calculationSequence += 1;
       closeSseClients();
     },
 
@@ -531,6 +533,8 @@ module.exports = (app: SignalKApp) => {
             });
         }
 
+        const sequence = ++calculationSequence;
+        pendingRoute = null;
         calcStatus = { status: 'calculating', progress: 0 };
         res.json({ status: 'calculating' });
 
@@ -571,6 +575,7 @@ module.exports = (app: SignalKApp) => {
               regionIndex,
               req.body,
               (pct, frontier) => {
+                if (sequence !== calculationSequence) throw new Error('Calculation cancelled');
                 calcStatus = { status: 'calculating', progress: pct, frontier };
                 pushSse({ type: 'progress', progress: pct, frontier });
               },
@@ -604,6 +609,7 @@ module.exports = (app: SignalKApp) => {
                   departureTime: segDepartureTime,
                 },
                 (pct, frontier) => {
+                  if (sequence !== calculationSequence) throw new Error('Calculation cancelled');
                   const mapped = progressBase * 100 + pct * (progressTop - progressBase);
                   calcStatus = {
                     status: 'calculating',
@@ -624,6 +630,7 @@ module.exports = (app: SignalKApp) => {
             warning = warnings.length > 0 ? warnings.join('; ') : undefined;
           }
 
+          if (sequence !== calculationSequence) return;
           pendingRoute = route;
           const loadWarning =
             calcFailedFiles.length > 0
@@ -652,6 +659,7 @@ module.exports = (app: SignalKApp) => {
           }
           closeSseClients();
         } catch (e: any) {
+          if (sequence !== calculationSequence) return;
           calcStatus = { status: 'error', progress: 0, error: e.message };
           app.setPluginError(`Route calculation failed: ${e.message}`);
           pushSse({
@@ -672,6 +680,15 @@ module.exports = (app: SignalKApp) => {
           nRegions: regionIndex?.regions.size ?? null,
           avoidRegionIds: settings?.avoidRegionIds ?? [],
         });
+      });
+
+      router.post('/cancel', (_req: Request, res: Response) => {
+        const wasCalculating = calcStatus.status === 'calculating';
+        calculationSequence += 1;
+        pendingRoute = null;
+        calcStatus = { status: 'idle', progress: 0 };
+        closeSseClients();
+        res.json({ cancelled: wasCalculating });
       });
 
       router.get('/calculation-stream', (req: Request, res: Response) => {

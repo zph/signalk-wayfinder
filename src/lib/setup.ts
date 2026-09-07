@@ -15,7 +15,20 @@ export const DILATED_INDEX_VERSION = 2;
 
 export function pluginDataDir(app: SignalKApp): string {
   const configPath: string = app.config?.configPath ?? path.join(os.homedir(), '.signalk');
-  return path.join(configPath, 'plugin-config-data', 'signalk-weather-routing');
+  const root = path.join(configPath, 'plugin-config-data');
+  const current = path.join(root, 'signalk-wayfinder');
+  const legacy = path.join(root, 'signalk-weather-routing');
+  // The product rename must not discard an installed user's extracted shoreline cache. Move the
+  // old directory once, before any current-name cache is created. A failed move merely rebuilds the
+  // bundled cache in the current directory, which is safe and does not change routing inputs.
+  if (!fs.existsSync(current) && fs.existsSync(legacy)) {
+    try {
+      fs.renameSync(legacy, current);
+    } catch {
+      /* rebuilt from bundled data below */
+    }
+  }
+  return current;
 }
 
 function bundledDataDir(): string {

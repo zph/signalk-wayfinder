@@ -8,7 +8,7 @@ test('reports ready only with every required planning input', () => {
   assert.deepEqual(wayfinderCapabilities({ hasPolar: true, hasForecast: true, hasShoreline: true }), {
     apiVersion: '1.0',
     ready: true,
-    objectives: ['fastest', 'leastMotoring'],
+    objectives: ['fastest'],
   });
 });
 

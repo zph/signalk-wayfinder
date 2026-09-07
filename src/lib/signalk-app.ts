@@ -1,4 +1,4 @@
-// Minimal SignalK plugin app interface — subset of methods used by signalk-weather-routing.
+// Minimal Signal K plugin app interface used by Sail Wayfinder.
 
 export interface SignalKResourceEntry {
   id?: string;
