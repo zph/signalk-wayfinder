@@ -51,3 +51,17 @@ test('validateCalculateInput: accepts valid input with negative coordinates', ()
   });
   assert.deepStrictEqual(result, { valid: true });
 });
+
+test('validateCalculateInput: validates departure and passage constraint values', () => {
+  const base = {
+    start: { lat: 0, lon: 0 },
+    end: { lat: 1, lon: 1 },
+    departureTime: '2024-06-15T12:00:00Z',
+  };
+  assert.equal(validateCalculateInput({ ...base, departureTime: 'not-a-date' }).valid, false);
+  assert.equal(validateCalculateInput({ ...base, options: { daylightOnly: 'yes' } }).valid, false);
+  assert.equal(validateCalculateInput({ ...base, options: { maxHoursPerDay: 25 } }).valid, false);
+  assert.deepEqual(validateCalculateInput({ ...base, options: { daylightOnly: true, maxHoursPerDay: 8 } }), {
+    valid: true,
+  });
+});

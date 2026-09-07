@@ -12,6 +12,7 @@ import {
 } from '../../types';
 import { MultiFileWindProvider } from '../windprovider';
 import { buildLandEdgeIndex } from '../landmask';
+import { isLegInDaylight, passageDayIndex } from '../passage-constraints';
 
 // Build a tiny synthetic GRIB: 3×3 grid, 2 time steps, constant 5 m/s southerly wind
 function makeGrib(times?: Date[]): GribData {
@@ -84,6 +85,78 @@ const algo = new IsochroneAlgorithm();
 
 test('IsochroneAlgorithm.id is "isochrone"', () => {
   assert.strictEqual(algo.id, 'isochrone');
+});
+
+function hourlyTimes(start: string, count: number): Date[] {
+  const startMs = new Date(start).getTime();
+  return Array.from({ length: count }, (_, index) => new Date(startMs + index * 3_600_000));
+}
+
+test('calculate: daylight-only route waits overnight and moves only in daylight', async () => {
+  const times = hourlyTimes('2024-06-21T00:00:00Z', 10);
+  const wind = makeWind(makeGrib(times));
+  const { route } = await algo.calculate(
+    wind,
+    null,
+    makePolar(),
+    null,
+    null,
+    {
+      start: { lat: 41, lon: 11 },
+      end: { lat: 41.08, lon: 11 },
+      departureTime: times[0].toISOString(),
+    },
+    () => {},
+    { daylightOnly: true, arrivalRadiusNm: 1 },
+  );
+
+  assert.ok(
+    route.some((point) => point.boatSpeed === 0),
+    'route should contain an overnight wait',
+  );
+  for (let index = 1; index < route.length; index++) {
+    const previous = route[index - 1];
+    const point = route[index];
+    if ((point.boatSpeed ?? 0) > 0 && point.time > previous.time) {
+      assert.ok(isLegInDaylight(previous.time, point.time, previous, point));
+    }
+  }
+});
+
+test('calculate: daily underway limit inserts rest until the next passage day', async () => {
+  const times = hourlyTimes('2024-06-21T06:00:00Z', 31);
+  const wind = makeWind(makeGrib(times));
+  const departure = times[0];
+  const { route } = await algo.calculate(
+    wind,
+    null,
+    makePolar(),
+    null,
+    null,
+    {
+      start: { lat: 41, lon: 11 },
+      end: { lat: 41.3, lon: 11 },
+      departureTime: departure.toISOString(),
+    },
+    () => {},
+    { maxHoursPerDay: 2, arrivalRadiusNm: 1 },
+  );
+
+  const hoursByDay = new Map<number, number>();
+  for (let index = 1; index < route.length; index++) {
+    const previous = route[index - 1];
+    const point = route[index];
+    if ((point.boatSpeed ?? 0) <= 0 || point.time <= previous.time) continue;
+    const day = passageDayIndex(previous.time, departure);
+    const hours = (point.time.getTime() - previous.time.getTime()) / 3_600_000;
+    hoursByDay.set(day, (hoursByDay.get(day) ?? 0) + hours);
+  }
+  assert.ok(
+    route.some((point) => point.boatSpeed === 0),
+    'route should contain a daily rest',
+  );
+  assert.ok([...hoursByDay.values()].every((hours) => hours <= 2));
+  assert.ok(hoursByDay.size >= 2, 'route should span at least two passage days');
 });
 
 test('calculate: rejects departure time past GRIB end', async () => {

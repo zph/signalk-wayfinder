@@ -38,8 +38,7 @@ The full specification — implemented requirements, open backlog, and design de
 Not massive:
 
 - I develop on a 2-core Intel(R) Celeron(R) N4505 @ 2.00GHz NUC - a _not very fast_ computer
-- Tested on a Raspberry Pi 3 Model B Rev 1.2 - I thought it would be hilariously slow but at least routes within the Baltic works reasonably. The U/I is a bit sluggish, but the routing is okay. 
-
+- Tested on a Raspberry Pi 3 Model B Rev 1.2 - I thought it would be hilariously slow but at least routes within the Baltic works reasonably. The U/I is a bit sluggish, but the routing is okay.
 
 ## Setup and configuration
 
@@ -57,32 +56,34 @@ Open **Server → Plugin Config → Sail Wayfinder** in the SignalK admin UI.
 
 ### Required settings
 
-| Setting | Description |
-|---|---|
-| `gribDir` | Full path to the directory containing GRIB2 forecast files |
-| `polarPath` | Full path to the polar diagram CSV file |
+| Setting     | Description                                                |
+| ----------- | ---------------------------------------------------------- |
+| `gribDir`   | Full path to the directory containing GRIB2 forecast files |
+| `polarPath` | Full path to the polar diagram CSV file                    |
 
 ### Algorithm tuning
 
 The defaults work well for most use cases.
 
-| Setting | Default | Description |
-|---|---|---|
-| `headingStep` | 5° | Angular resolution when evaluating candidate headings. Lower values produce more accurate routes at the cost of longer calculation time. |
-| `sectorSize` | 1° | Bearing sector width for frontier pruning. After each timestep the top 2 candidates per sector are kept. |
-| `minBoatSpeed` | 0.3 kn | Headings producing less than this effective speed are discarded. Prevents near-stationary drift being treated as a viable route. |
-| `arrivalRadiusNm` | 2 NM | Distance from the destination at which the route is considered complete. |
-| `coneHalfAngle` | 100° | Half-angle of the directional cone applied when the straight-line path to the destination is clear of land. Headings outside this cone are not evaluated. Disabled automatically per frontier point when land blocks the direct path. |
-| `coneDisableLookaheadNm` | 100 NM | How far ahead to check for land when deciding whether to disable the cone for a given frontier point. |
-| `maxHeadingChange` | 120° | Maximum course change allowed between consecutive timesteps, preventing unrealistic zig-zagging. |
+| Setting                  | Default | Description                                                                                                                                                                                                                           |
+| ------------------------ | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `headingStep`            | 5°      | Angular resolution when evaluating candidate headings. Lower values produce more accurate routes at the cost of longer calculation time.                                                                                              |
+| `sectorSize`             | 1°      | Bearing sector width for frontier pruning. After each timestep the top 2 candidates per sector are kept.                                                                                                                              |
+| `minBoatSpeed`           | 0.3 kn  | Headings producing less than this effective speed are discarded. Prevents near-stationary drift being treated as a viable route.                                                                                                      |
+| `arrivalRadiusNm`        | 2 NM    | Distance from the destination at which the route is considered complete.                                                                                                                                                              |
+| `coneHalfAngle`          | 100°    | Half-angle of the directional cone applied when the straight-line path to the destination is clear of land. Headings outside this cone are not evaluated. Disabled automatically per frontier point when land blocks the direct path. |
+| `coneDisableLookaheadNm` | 100 NM  | How far ahead to check for land when deciding whether to disable the cone for a given frontier point.                                                                                                                                 |
+| `maxHeadingChange`       | 120°    | Maximum course change allowed between consecutive timesteps, preventing unrealistic zig-zagging.                                                                                                                                      |
+| `daylightOnly`           | false   | Holds position during forecast steps that are not fully in daylight at the route location.                                                                                                                                            |
+| `maxHoursPerDay`         | 0 h     | Maximum underway time in each 24-hour passage day, anchored to departure time. Set to 0 for unlimited.                                                                                                                                |
 
 ### Display settings
 
-| Setting | Default | Description |
-|---|---|---|
-| `windSpeedMs` | false | When enabled, wind speed is displayed and entered in m/s throughout the webapp, overriding the SignalK unit preference for wind speed. All other values (boat speed, wave height, distances) continue to follow the active SignalK unit preset. |
-| `waveOverlayMaxM` | 3.0 | Upper bound of the wave height colour scale. Heights >= this value appear red. Affects both the colour gradient in the wave overlay and the legend label. |
-| `hideTestButtons` | true | Hides the Run test / Helsinki test / Gothenburg test buttons. Set to `false` to expose them for development and validation. |
+| Setting           | Default | Description                                                                                                                                                                                                                                     |
+| ----------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `windSpeedMs`     | false   | When enabled, wind speed is displayed and entered in m/s throughout the webapp, overriding the SignalK unit preference for wind speed. All other values (boat speed, wave height, distances) continue to follow the active SignalK unit preset. |
+| `waveOverlayMaxM` | 3.0     | Upper bound of the wave height colour scale. Heights >= this value appear red. Affects both the colour gradient in the wave overlay and the legend label.                                                                                       |
+| `hideTestButtons` | true    | Hides the Run test / Helsinki test / Gothenburg test buttons. Set to `false` to expose them for development and validation.                                                                                                                     |
 
 **Build version:** The git commit SHA or tag is shown as small dimmed text at the very bottom of the settings sidebar, useful for diagnostics and support.
 
@@ -130,6 +131,10 @@ The routing algorithm always picks the highest-priority file that covers each po
 If a file with the same name already exists in the archive folder, a serial number is inserted before the extension (e.g. `forecast.grb2` → `forecast.2.grb2`).
 
 ### Routing options
+
+#### Passage schedule
+
+The selected departure date and time anchors both the forecast calculation and the passage-day schedule. Enable **Daylight-only sailing** to hold position while the sun is below the horizon. Set **Maximum underway per day** from 1 to 24 hours to insert rest after that much sailing or motoring; 0 leaves daily underway time unlimited. Waiting consumes elapsed passage time but not underway hours. A new passage day begins every 24 hours from the selected departure time.
 
 #### Coast avoidance
 
@@ -186,12 +191,14 @@ OpenSkiron ICON-EU EWAM files are combined files containing atmospheric wind dat
 The plugin supports ocean current GRIB2 files from [RTOFS](https://nomads.ncep.noaa.gov/pub/data/nccf/com/rtofs/prod/) (NOAA, free, global), [BSH](https://www.bsh.de/EN/DATA/Predictions/Currents/Surface_currents_for_sailors/surface_currents_for_sailors_node.html) (German Federal Maritime and Hydrographic Agency, free, European waters), and [CMEMS](https://marine.copernicus.eu/) (Copernicus, free registration, global). Place any current GRIB file in the same `gribDir` as the wind files — the plugin detects it automatically by its GRIB metadata (UOGRD/VOGRD bands at ocean surface level) and applies the interpolated current vectors to the routing algorithm.
 
 When a current file is loaded:
+
 - The **Grib Manager** lists the current file with its model run age in the same amber/red staleness scheme as wind files (shown as an "ocean current" row).
 - The **Currents** layer checkbox in the Layers panel enables a current vector overlay on the map — cyan arrows showing current direction and speed, driven by the time scrubber.
 - Clicking the map while the Currents overlay is active shows current speed (kn) and direction (°T) in the popup.
 - The routing algorithm adds the current's eastward/northward velocity components to each frontier point's displacement, giving correct ground-track advancement globally.
 
 **Important limitations:**
+
 - **Tidal streams are not modelled.** Ocean current GRIB products (RTOFS, CMEMS global) represent large-scale circulation averaged over hours; they do not capture reversing tidal streams in straits and coastal waters. Plan tide gates separately using tidal atlases.
 - **Coverage gaps.** When the current GRIB does not cover part of a route (e.g. RTOFS excludes marginal seas), zero current is applied for those points. The coverage boundary is visible as the dashed box on the map.
 - **Model currency.** Use recent current files — Gulf Stream position and eddy structure can shift by 50–100 nm week to week. The staleness indicator helps identify old files.

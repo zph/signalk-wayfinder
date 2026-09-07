@@ -126,6 +126,8 @@ export interface IsochronePoint {
   windDir: number;
   stepCalcMs: number; // wall-clock ms to compute the isochrone step that created this point
   gribFilePath?: string;
+  passageDayIndex: number;
+  underwayHoursToday: number;
   parent?: IsochronePoint;
 }
 
@@ -180,6 +182,8 @@ export interface RouteQualityReport {
     maxWindShiftDeg: number;
     maxTwaErrorDeg: number;
     maxForecastLeadHours: number | null;
+    underwayHours: number;
+    passageDays: number;
   };
 }
 
@@ -204,6 +208,8 @@ export interface PluginSettings {
   maxHeadingChange?: number;
   conditionsGraphHeight?: number;
   forecastSkillHorizonHours?: number;
+  daylightOnly?: boolean;
+  maxHoursPerDay?: number;
   avoidRegionIds?: string[];
 }
 

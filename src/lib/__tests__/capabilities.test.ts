@@ -6,9 +6,10 @@ import { wayfinderCapabilities } from '../capabilities';
 
 test('reports ready only with every required planning input', () => {
   assert.deepEqual(wayfinderCapabilities({ hasPolar: true, hasForecast: true, hasShoreline: true }), {
-    apiVersion: '1.0',
+    apiVersion: '1.1',
     ready: true,
     objectives: ['fastest'],
+    passageConstraints: ['daylightOnly', 'maxHoursPerDay'],
   });
 });
 

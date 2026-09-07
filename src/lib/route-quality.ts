@@ -13,6 +13,7 @@ import { haversineNM, trueWindAngle } from './geo';
 import { interpolateBoatSpeed } from './polar';
 import { isPointOnLand, segmentCrossesLandFast } from './landmask';
 import { isPointInRegion, segmentCrossesRegion } from './regions';
+import { advanceUnderwayBudget, isLegInDaylight } from './passage-constraints';
 
 const ENDPOINT_TOLERANCE_NM = 0.1;
 const TWA_TOLERANCE_DEG = 1;
@@ -30,6 +31,8 @@ export interface RouteQualityContext {
   forecastSkillHorizonHours: number;
   motorSpeedKn: number;
   motorBelowKn: number;
+  daylightOnly: boolean;
+  maxHoursPerDay: number;
 }
 
 function angularDifference(a: number, b: number): number {
@@ -61,6 +64,9 @@ export function assessRouteQuality(route: RoutePoint[], context: RouteQualityCon
   let maxWindShiftDeg = 0;
   let maxTwaErrorDeg = 0;
   let maxForecastLeadHours: number | null = null;
+  let underwayHours = 0;
+  let budgetDayIndex = 0;
+  let underwayHoursToday = 0;
 
   if (route.length < 2) add('too-few-points', 'error', 'Route has fewer than two points.');
 
@@ -105,6 +111,34 @@ export function assessRouteQuality(route: RoutePoint[], context: RouteQualityCon
     if (elapsedMs < 0) add('time-reversal', 'error', `Route time moves backward on leg ${i}.`);
     if (elapsedMs === 0 && legDistanceNm > 0.01) {
       add('zero-duration-leg', 'warning', 'The final arrival-radius snap has distance but no added passage time.');
+    }
+    const isUnderway = elapsedMs > 0 && legDistanceNm > 0.01 && (point.boatSpeed ?? 0) > 0;
+    if (isUnderway) {
+      const elapsedHours = elapsedMs / 3_600_000;
+      underwayHours += elapsedHours;
+      if (context.daylightOnly && !isLegInDaylight(previous.time, point.time, previous, point)) {
+        add('night-sailing', 'error', `Route leg ${i} is underway outside daylight.`);
+      }
+    }
+    if (elapsedMs > 0) {
+      const budget = advanceUnderwayBudget({
+        start: previous.time,
+        end: point.time,
+        departure: route[0].time,
+        currentDayIndex: budgetDayIndex,
+        currentHoursToday: underwayHoursToday,
+        maxHoursPerDay: context.maxHoursPerDay,
+        underway: isUnderway,
+      });
+      if (!budget.allowed) {
+        add(
+          'daily-hours-exceeded',
+          'error',
+          `Route exceeds the configured ${context.maxHoursPerDay}-hour daily underway limit.`,
+        );
+      }
+      budgetDayIndex = budget.passageDayIndex;
+      underwayHoursToday = budget.hoursToday;
     }
 
     if (
@@ -219,6 +253,8 @@ export function assessRouteQuality(route: RoutePoint[], context: RouteQualityCon
       maxWindShiftDeg,
       maxTwaErrorDeg,
       maxForecastLeadHours,
+      underwayHours,
+      passageDays: route.length > 0 ? budgetDayIndex + 1 : 0,
     },
   };
 }

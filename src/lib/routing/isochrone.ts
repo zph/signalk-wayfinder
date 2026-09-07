@@ -24,6 +24,7 @@ import {
   trueWindAngle,
   DEG_TO_RAD,
 } from '../geo';
+import { advanceUnderwayBudget, isLegInDaylight, solarElevationDeg } from '../passage-constraints';
 
 const DEFAULT_HEADING_STEP = 5;
 const DEFAULT_SECTOR_SIZE = 1;
@@ -126,6 +127,9 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
     const motorSpeedKn = Number(options?.motorSpeedKn ?? 0); // 0 = no motor
     const motorBelowKn = Number(options?.motorBelowKn ?? 0); // 0 = disabled
     const waitForWind = Boolean(options?.waitForWind ?? false);
+    const daylightOnly = Boolean(options?.daylightOnly ?? false);
+    const requestedMaxHours = Number(options?.maxHoursPerDay ?? 0);
+    const maxHoursPerDay = Number.isFinite(requestedMaxHours) ? Math.max(0, Math.min(24, requestedMaxHours)) : 0;
     const configuredConeHalfAngle = Number(options?.coneHalfAngle ?? FINE_PASS_CONE_HALF_ANGLE);
     const coneDisableLookaheadNm = Number(options?.coneDisableLookaheadNm ?? CONE_DISABLE_LOOKAHEAD_NM);
     const maxHeadingChangeDeg = Number(options?.maxHeadingChange ?? MAX_HEADING_CHANGE);
@@ -158,6 +162,8 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
         tws: windSpeedKnots(seedVec.u, seedVec.v),
         boatSpeed: undefined,
         windDir: windDirection(seedVec.u, seedVec.v),
+        passageDayIndex: 0,
+        underwayHoursToday: 0,
         stepCalcMs: 0,
         parent: undefined,
       },
@@ -206,6 +212,50 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
         const tws = windSpeedKnots(windVec.u, windVec.v);
         const wdir = windDirection(windVec.u, windVec.v);
 
+        const restBudget = advanceUnderwayBudget({
+          start: point.time,
+          end: nextTime,
+          departure: departureTime,
+          currentDayIndex: point.passageDayIndex,
+          currentHoursToday: point.underwayHoursToday,
+          maxHoursPerDay,
+          underway: false,
+        });
+        let waitCandidateAdded = false;
+        const addWaitCandidate = (): void => {
+          if (waitCandidateAdded) return;
+          candidates.push({
+            lat: point.lat,
+            lon: point.lon,
+            time: nextTime,
+            heading: point.heading,
+            twa: point.parent === undefined ? 0 : trueWindAngle(point.heading, wdir),
+            tws,
+            boatSpeed: 0,
+            windDir: wdir,
+            passageDayIndex: restBudget.passageDayIndex,
+            underwayHoursToday: restBudget.hoursToday,
+            stepCalcMs: 0,
+            gribFilePath,
+            parent: point,
+          });
+          waitCandidateAdded = true;
+        };
+
+        const underwayBudget = advanceUnderwayBudget({
+          start: point.time,
+          end: nextTime,
+          departure: departureTime,
+          currentDayIndex: point.passageDayIndex,
+          currentHoursToday: point.underwayHoursToday,
+          maxHoursPerDay,
+          underway: true,
+        });
+        if (!underwayBudget.allowed || (daylightOnly && solarElevationDeg(point.time, point.lat, point.lon) <= 0)) {
+          addWaitCandidate();
+          continue;
+        }
+
         if (maxWindKn > 0 && tws > maxWindKn) {
           rejectedByPolar++;
           continue;
@@ -230,7 +280,8 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
         if (directPathBlockedByLand || directPathBlockedByRegion) coneDisabledCount++;
         const coneHalfAngle = directPathBlockedByLand || directPathBlockedByRegion ? 180 : configuredConeHalfAngle;
 
-        let waitCandidateAdded = false;
+        const candidatesBeforeHeadings = candidates.length;
+        let rejectedByDaylight = false;
         for (let hdg = 0; hdg < 360; hdg += headingStep) {
           const deviation = Math.abs(((hdg - pointToDestBearing + 180 + 360) % 360) - 180);
           if (deviation > coneHalfAngle) continue;
@@ -251,22 +302,7 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
           // REQ-82: below minimum → zero-speed gate before discard.
           if (effectiveSpeed < minBoatSpeed) {
             // REQ-83: stay in place for one candidate per frontier point; advancing time only.
-            if (waitForWind && !waitCandidateAdded) {
-              candidates.push({
-                lat: point.lat,
-                lon: point.lon,
-                time: nextTime,
-                heading: point.heading,
-                twa: point.twa,
-                tws,
-                boatSpeed: 0,
-                windDir: wdir,
-                stepCalcMs: 0,
-                gribFilePath,
-                parent: point,
-              });
-              waitCandidateAdded = true;
-            }
+            if (waitForWind) addWaitCandidate();
             rejectedByPolar++;
             continue;
           }
@@ -292,6 +328,11 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
             rejectedByGrib++;
             continue;
           } // discard candidates outside spatiotemporal GRIB domain (BUG-37, BUG-75)
+
+          if (daylightOnly && !isLegInDaylight(point.time, nextTime, point, { lat: newLat, lon: newLon })) {
+            rejectedByDaylight = true;
+            continue;
+          }
 
           if (edgeIndex) {
             landChecksPerformed++;
@@ -321,6 +362,8 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
             tws,
             boatSpeed: effectiveSpeed,
             windDir: wdir,
+            passageDayIndex: underwayBudget.passageDayIndex,
+            underwayHoursToday: underwayBudget.hoursToday,
             stepCalcMs: 0,
             gribFilePath,
             parent: point,
@@ -334,6 +377,7 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
             }
           }
         }
+        if (rejectedByDaylight && candidates.length === candidatesBeforeHeadings) addWaitCandidate();
       }
 
       const frontierLoopMs = performance.now() - t0frontier;

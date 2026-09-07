@@ -367,6 +367,21 @@ module.exports = (app: SignalKApp) => {
           description: 'Maximum course change allowed between consecutive timesteps.',
           default: 120,
         },
+        daylightOnly: {
+          type: 'boolean',
+          title: 'Daylight-only routing',
+          description: 'Wait at the current position rather than sailing while the sun is below the horizon.',
+          default: false,
+        },
+        maxHoursPerDay: {
+          type: 'number',
+          title: 'Maximum underway hours per passage day',
+          description:
+            'Maximum sailing or motoring hours in each 24-hour period anchored to departure time. Set to 0 for unlimited.',
+          default: 0,
+          minimum: 0,
+          maximum: 24,
+        },
         waveOverlayMaxM: {
           type: 'number',
           title: 'Wave overlay max (m)',
@@ -439,12 +454,15 @@ module.exports = (app: SignalKApp) => {
           coneHalfAngle: settings?.coneHalfAngle,
           coneDisableLookaheadNm: settings?.coneDisableLookaheadNm,
           maxHeadingChange: settings?.maxHeadingChange,
+          daylightOnly: settings?.daylightOnly,
+          maxHoursPerDay: settings?.maxHoursPerDay,
           ...options,
         };
         const inputValidation = validateCalculateInput({
           start,
           end,
           departureTime,
+          options,
         });
         if (!inputValidation.valid) {
           return void res.status(400).json({ error: inputValidation.error });
@@ -649,6 +667,8 @@ module.exports = (app: SignalKApp) => {
             forecastSkillHorizonHours: Number(settings?.forecastSkillHorizonHours ?? 96),
             motorSpeedKn: Number(mergedOptions.motorSpeedKn ?? 0),
             motorBelowKn: Number(mergedOptions.motorBelowKn ?? 0),
+            daylightOnly: Boolean(mergedOptions.daylightOnly ?? false),
+            maxHoursPerDay: Number(mergedOptions.maxHoursPerDay ?? 0),
           });
           if (!quality.valid) {
             throw new Error(

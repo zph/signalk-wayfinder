@@ -60,6 +60,8 @@ function context(overrides: Partial<RouteQualityContext> = {}): RouteQualityCont
     forecastSkillHorizonHours: 96,
     motorSpeedKn: 0,
     motorBelowKn: 0,
+    daylightOnly: false,
+    maxHoursPerDay: 0,
     ...overrides,
   };
 }
@@ -127,4 +129,22 @@ test('warns about non-timed arrival snaps and disabled land checks', () => {
   assert.equal(report.valid, true);
   assert.ok(report.issues.some((issue) => issue.code === 'zero-duration-leg'));
   assert.ok(report.issues.some((issue) => issue.code === 'land-check-disabled'));
+});
+
+test('fails a moving route leg outside daylight when daylight-only routing is requested', () => {
+  const route = validRoute();
+  route[0].time = new Date('2026-06-06T00:00:00Z');
+  route[1].time = new Date('2026-06-06T01:00:00Z');
+  const report = assessRouteQuality(route, context({ daylightOnly: true }));
+  assert.equal(report.valid, false);
+  assert.ok(report.issues.some((issue) => issue.code === 'night-sailing'));
+});
+
+test('fails a route that exceeds its daily underway-hours budget', () => {
+  const route = validRoute();
+  route[1].time = new Date('2026-06-06T09:00:00Z');
+  const report = assessRouteQuality(route, context({ maxHoursPerDay: 2 }));
+  assert.equal(report.valid, false);
+  assert.ok(report.issues.some((issue) => issue.code === 'daily-hours-exceeded'));
+  assert.equal(report.metrics.underwayHours, 3);
 });
