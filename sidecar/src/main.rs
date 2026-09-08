@@ -7,11 +7,22 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::{env, process};
 use wayfinder_core_sidecar::{
-    CalculateOptions, CalculateRequest, LatLon, Polar, WindGrid, calculate,
+    CalculateOptions, CalculateRequest, CurrentGrid, LatLon, Polar, WindGrid, calculate,
 };
 
-const PROTOCOL_VERSION: u32 = 1;
+const PROTOCOL_VERSION: u32 = 2;
 const MAX_REQUEST_BYTES: usize = 512 * 1024 * 1024;
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CalculationInput {
+    request: CalculateRequest,
+    #[serde(default)]
+    options: CalculateOptions,
+    polar: Polar,
+    wind_sources: Vec<WindGrid>,
+    current: Option<CurrentGrid>,
+}
 
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -27,11 +38,8 @@ enum Request {
         protocol_version: u32,
         #[serde(rename = "requestId")]
         request_id: String,
-        request: CalculateRequest,
-        #[serde(default)]
-        options: Box<CalculateOptions>,
-        polar: Polar,
-        wind: Box<WindGrid>,
+        #[serde(flatten)]
+        calculation: Box<CalculationInput>,
     },
 }
 
@@ -103,8 +111,11 @@ fn handle(stream: UnixStream) -> std::io::Result<()> {
                         "capabilities": {
                             "openWaterWind": true,
                             "landAvoidance": false,
-                            "currents": false,
-                            "waves": false,
+                            "currents": true,
+                            "waves": true,
+                            "multipleWindSources": true,
+                            "motorFallback": true,
+                            "waitForWind": true,
                             "passageConstraints": false,
                             "navigationSafety": false,
                             "transport": "unix-ndjson-v1"
@@ -115,10 +126,7 @@ fn handle(stream: UnixStream) -> std::io::Result<()> {
             Request::Calculate {
                 protocol_version,
                 request_id,
-                request,
-                options,
-                polar,
-                wind,
+                calculation,
             } => {
                 if protocol_version != PROTOCOL_VERSION {
                     error(
@@ -129,11 +137,19 @@ fn handle(stream: UnixStream) -> std::io::Result<()> {
                     );
                     continue;
                 }
+                let CalculationInput {
+                    request,
+                    options,
+                    polar,
+                    wind_sources,
+                    current,
+                } = *calculation;
                 let outcome = calculate(
                     &request,
                     &options,
                     &polar,
-                    &wind,
+                    &wind_sources,
+                    current.as_ref(),
                     |percent, frontier: &[LatLon]| {
                         let _ = send(
                             &mut writer,

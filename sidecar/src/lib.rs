@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::cmp::Ordering;
+use std::collections::{BTreeSet, HashMap};
 use std::f64::consts::PI;
 
 const EARTH_RADIUS_NM: f64 = 3440.065;
@@ -16,6 +17,10 @@ pub struct LatLon {
 #[serde(rename_all = "camelCase")]
 pub struct WindGrid {
     pub source_path: Option<String>,
+    #[serde(default)]
+    pub reference_time_ms: i64,
+    #[serde(default)]
+    pub mtime_ms: i64,
     pub times_ms: Vec<i64>,
     pub lat_min: f64,
     pub lat_step: f64,
@@ -25,6 +30,34 @@ pub struct WindGrid {
     pub n_lon: usize,
     pub u10: Vec<Vec<f32>>,
     pub v10: Vec<Vec<f32>>,
+    pub wave: Option<ScalarGrid>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScalarGrid {
+    pub times_ms: Vec<i64>,
+    pub lat_min: f64,
+    pub lat_step: f64,
+    pub lon_min: f64,
+    pub lon_step: f64,
+    pub n_lat: usize,
+    pub n_lon: usize,
+    pub values: Vec<Vec<f32>>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CurrentGrid {
+    pub times_ms: Vec<i64>,
+    pub lat_min: f64,
+    pub lat_step: f64,
+    pub lon_min: f64,
+    pub lon_step: f64,
+    pub n_lat: usize,
+    pub n_lon: usize,
+    pub u: Vec<Vec<f32>>,
+    pub v: Vec<Vec<f32>>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -51,6 +84,13 @@ pub struct CalculateOptions {
     pub arrival_radius_nm: Option<f64>,
     pub cone_half_angle: Option<f64>,
     pub max_heading_change: Option<f64>,
+    pub heading_offset_deg: Option<f64>,
+    pub max_wind_kn: Option<f64>,
+    pub max_wave_m: Option<f64>,
+    pub motor_speed_kn: Option<f64>,
+    pub motor_below_kn: Option<f64>,
+    pub force_motor: Option<bool>,
+    pub wait_for_wind: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -69,6 +109,8 @@ pub struct RoutePoint {
     pub wind_dir: f64,
     pub leg_calc_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub wave_height: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub grib_file_path: Option<String>,
 }
 
@@ -77,10 +119,9 @@ struct Node {
     position: LatLon,
     time_ms: i64,
     heading: f64,
-    twa: f64,
-    tws: f64,
     boat_speed: Option<f64>,
-    wind_dir: f64,
+    propulsion: Option<&'static str>,
+    grib_file_path: Option<String>,
     parent: Option<usize>,
 }
 
@@ -88,13 +129,14 @@ pub fn calculate<F>(
     request: &CalculateRequest,
     options: &CalculateOptions,
     polar: &Polar,
-    wind: &WindGrid,
+    wind_sources: &[WindGrid],
+    current: Option<&CurrentGrid>,
     mut progress: F,
 ) -> Result<Vec<RoutePoint>, String>
 where
     F: FnMut(f64, &[LatLon]),
 {
-    validate(wind, polar)?;
+    validate(wind_sources, current, polar)?;
     let heading_step = positive(options.heading_step.unwrap_or(5.0), "headingStep")?;
     let sector_size = positive(options.sector_size.unwrap_or(1.0), "sectorSize")?;
     let min_boat_speed = non_negative(options.min_boat_speed.unwrap_or(0.3), "minBoatSpeed")?;
@@ -111,32 +153,42 @@ where
         180.0,
         "maxHeadingChange",
     )?;
+    let heading_offset = finite(
+        options.heading_offset_deg.unwrap_or(0.0),
+        "headingOffsetDeg",
+    )?;
+    let max_wind_kn = non_negative(options.max_wind_kn.unwrap_or(0.0), "maxWindKn")?;
+    let max_wave_m = non_negative(options.max_wave_m.unwrap_or(0.0), "maxWaveM")?;
+    let motor_speed_kn = non_negative(options.motor_speed_kn.unwrap_or(0.0), "motorSpeedKn")?;
+    let motor_below_kn = non_negative(options.motor_below_kn.unwrap_or(0.0), "motorBelowKn")?;
+    let force_motor = options.force_motor.unwrap_or(false);
+    let wait_for_wind = options.wait_for_wind.unwrap_or(false);
 
-    let start_idx = nearest_time_index(&wind.times_ms, request.departure_time_ms);
-    if start_idx + 1 >= wind.times_ms.len() {
+    let times_ms = merged_times(wind_sources);
+
+    let start_idx = nearest_time_index(&times_ms, request.departure_time_ms);
+    if start_idx + 1 >= times_ms.len() {
         return Err("departure time is at or after the end of the forecast data".into());
     }
-    if !covers(wind, request.start) || !covers(wind, request.end) {
+    if !covers_any(wind_sources, request.start) || !covers_any(wind_sources, request.end) {
         return Err("start and destination must be inside the supplied wind grid".into());
     }
 
-    let seed_wind = sample_wind(wind, request.start, start_idx)?;
     let mut arena = vec![Node {
         position: request.start,
-        time_ms: wind.times_ms[start_idx],
+        time_ms: times_ms[start_idx],
         heading: 0.0,
-        twa: 0.0,
-        tws: wind_speed_knots(seed_wind),
         boat_speed: None,
-        wind_dir: wind_direction(seed_wind),
+        propulsion: None,
+        grib_file_path: None,
         parent: None,
     }];
     let mut frontier = vec![0usize];
-    let total_steps = wind.times_ms.len() - start_idx - 1;
+    let total_steps = times_ms.len() - start_idx - 1;
 
-    for (completed, step) in (start_idx..wind.times_ms.len() - 1).enumerate() {
-        let next_time = wind.times_ms[step + 1];
-        let dt_hours = (next_time - wind.times_ms[step]) as f64 / 3_600_000.0;
+    for (completed, step) in (start_idx..times_ms.len() - 1).enumerate() {
+        let next_time = times_ms[step + 1];
+        let dt_hours = (next_time - times_ms[step]) as f64 / 3_600_000.0;
         if !dt_hours.is_finite() || dt_hours <= 0.0 {
             return Err("wind times must be strictly increasing".into());
         }
@@ -145,13 +197,43 @@ where
         let mut arrived: Option<(usize, f64)> = None;
         for parent_index in frontier.iter().copied() {
             let point = arena[parent_index].clone();
-            let wind_vector = sample_wind(wind, point.position, step)?;
+            let (wind_vector, source_path) =
+                sample_selected_wind(wind_sources, point.position, times_ms[step]);
             let tws = wind_speed_knots(wind_vector);
             let wind_dir = wind_direction(wind_vector);
             let destination_bearing = bearing_to(point.position, request.end);
 
-            let mut raw_heading = 0.0;
-            while raw_heading < 360.0 {
+            if max_wind_kn > 0.0 && tws > max_wind_kn {
+                continue;
+            }
+            if max_wave_m > 0.0
+                && sample_selected_wave(wind_sources, point.position, times_ms[step])
+                    .is_some_and(|height| height > max_wave_m)
+            {
+                continue;
+            }
+
+            let mut wait_candidate_added = false;
+            let mut add_wait_candidate = |arena: &mut Vec<Node>, candidates: &mut Vec<usize>| {
+                if wait_candidate_added {
+                    return;
+                }
+                let index = arena.len();
+                arena.push(Node {
+                    position: point.position,
+                    time_ms: next_time,
+                    heading: point.heading,
+                    boat_speed: Some(0.0),
+                    propulsion: Some("wait"),
+                    grib_file_path: source_path.clone(),
+                    parent: Some(parent_index),
+                });
+                candidates.push(index);
+                wait_candidate_added = true;
+            };
+
+            let mut raw_heading = heading_offset;
+            while raw_heading < 360.0 + heading_offset {
                 let heading = normalize_degrees(raw_heading);
                 if angle_difference(heading, destination_bearing) > cone_half_angle {
                     raw_heading += heading_step;
@@ -165,14 +247,32 @@ where
                 }
 
                 let twa = true_wind_angle(heading, wind_dir);
-                let boat_speed = interpolate_boat_speed(polar, twa, tws);
+                let polar_speed = interpolate_boat_speed(polar, twa, tws);
+                let motoring = motor_speed_kn > 0.0
+                    && (force_motor || (motor_below_kn > 0.0 && polar_speed < motor_below_kn));
+                let boat_speed = if motoring {
+                    motor_speed_kn
+                } else {
+                    polar_speed
+                };
                 if boat_speed < min_boat_speed {
+                    if wait_for_wind {
+                        add_wait_candidate(&mut arena, &mut candidates);
+                    }
                     raw_heading += heading_step;
                     continue;
                 }
 
-                let position = destination_point(point.position, boat_speed * dt_hours, heading);
-                if !covers(wind, position) {
+                let water_track = destination_point(point.position, boat_speed * dt_hours, heading);
+                let mut position = water_track;
+                if let Some(grid) = current {
+                    let drift = sample_current(grid, point.position, next_time);
+                    let dt_seconds = dt_hours * 3_600.0;
+                    position.lat += (drift.1 * dt_seconds) / (1852.0 * 60.0);
+                    position.lon += (drift.0 * dt_seconds)
+                        / (1852.0 * 60.0 * radians(point.position.lat).cos());
+                }
+                if !covers_at_time(wind_sources, position, times_ms[step]) {
                     raw_heading += heading_step;
                     continue;
                 }
@@ -181,10 +281,9 @@ where
                     position,
                     time_ms: next_time,
                     heading,
-                    twa,
-                    tws,
                     boat_speed: Some(boat_speed),
-                    wind_dir,
+                    propulsion: Some(if motoring { "motor" } else { "sail" }),
+                    grib_file_path: source_path.clone(),
                     parent: Some(parent_index),
                 });
                 candidates.push(node_index);
@@ -201,7 +300,14 @@ where
 
         if let Some((node_index, remaining)) = arrived {
             progress(100.0, &[]);
-            return Ok(backtrack(&arena, node_index, request.end, remaining, wind));
+            return Ok(backtrack(
+                &arena,
+                node_index,
+                request.end,
+                remaining,
+                wind_sources,
+                &times_ms,
+            ));
         }
         if candidates.is_empty() {
             return Err("frontier exhausted before reaching the destination".into());
@@ -221,24 +327,148 @@ where
     Err("destination not reached within the supplied forecast period".into())
 }
 
-fn validate(wind: &WindGrid, polar: &Polar) -> Result<(), String> {
-    if wind.n_lat < 2 || wind.n_lon < 2 || wind.times_ms.len() < 2 {
-        return Err("wind grid must have at least 2x2 cells and two time steps".into());
+fn validate(
+    wind_sources: &[WindGrid],
+    current: Option<&CurrentGrid>,
+    polar: &Polar,
+) -> Result<(), String> {
+    if wind_sources.is_empty() {
+        return Err("at least one wind source is required".into());
     }
-    let frame_size = wind.n_lat * wind.n_lon;
-    if wind.u10.len() != wind.times_ms.len()
-        || wind.v10.len() != wind.times_ms.len()
-        || wind.u10.iter().any(|frame| frame.len() != frame_size)
-        || wind.v10.iter().any(|frame| frame.len() != frame_size)
-    {
-        return Err("wind frame dimensions do not match grid metadata".into());
+    for wind in wind_sources {
+        validate_geometry(
+            wind.lat_min,
+            wind.lat_step,
+            wind.lon_min,
+            wind.lon_step,
+            wind.n_lat,
+            wind.n_lon,
+            "wind",
+        )?;
+        validate_vector_grid(
+            wind.n_lat,
+            wind.n_lon,
+            &wind.times_ms,
+            &wind.u10,
+            &wind.v10,
+            "wind",
+        )?;
+        if let Some(wave) = &wind.wave {
+            validate_geometry(
+                wave.lat_min,
+                wave.lat_step,
+                wave.lon_min,
+                wave.lon_step,
+                wave.n_lat,
+                wave.n_lon,
+                "wave",
+            )?;
+            validate_scalar_grid(wave)?;
+        }
+    }
+    if let Some(grid) = current {
+        validate_geometry(
+            grid.lat_min,
+            grid.lat_step,
+            grid.lon_min,
+            grid.lon_step,
+            grid.n_lat,
+            grid.n_lon,
+            "current",
+        )?;
+        validate_vector_grid(
+            grid.n_lat,
+            grid.n_lon,
+            &grid.times_ms,
+            &grid.u,
+            &grid.v,
+            "current",
+        )?;
     }
     if polar.tws.len() < 2
         || polar.twa.len() < 2
         || polar.speeds.len() != polar.twa.len()
         || polar.speeds.iter().any(|row| row.len() != polar.tws.len())
+        || polar
+            .tws
+            .iter()
+            .chain(&polar.twa)
+            .any(|value| !value.is_finite())
+        || polar
+            .speeds
+            .iter()
+            .flatten()
+            .any(|value| !value.is_finite())
+        || polar.tws.windows(2).any(|pair| pair[0] >= pair[1])
+        || polar.twa.windows(2).any(|pair| pair[0] >= pair[1])
     {
         return Err("polar dimensions are invalid".into());
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_geometry(
+    lat_min: f64,
+    lat_step: f64,
+    lon_min: f64,
+    lon_step: f64,
+    n_lat: usize,
+    n_lon: usize,
+    name: &str,
+) -> Result<(), String> {
+    if !lat_min.is_finite()
+        || !lon_min.is_finite()
+        || !lat_step.is_finite()
+        || !lon_step.is_finite()
+        || lat_step <= 0.0
+        || lon_step <= 0.0
+        || n_lat < 2
+        || n_lon < 2
+    {
+        return Err(format!("{name} grid geometry is invalid"));
+    }
+    Ok(())
+}
+
+fn validate_vector_grid(
+    n_lat: usize,
+    n_lon: usize,
+    times: &[i64],
+    u: &[Vec<f32>],
+    v: &[Vec<f32>],
+    name: &str,
+) -> Result<(), String> {
+    if n_lat < 2 || n_lon < 2 || times.len() < 2 {
+        return Err(format!(
+            "{name} grid must have at least 2x2 cells and two time steps"
+        ));
+    }
+    let frame_size = n_lat * n_lon;
+    if u.len() != times.len()
+        || v.len() != times.len()
+        || u.iter().any(|frame| frame.len() != frame_size)
+        || v.iter().any(|frame| frame.len() != frame_size)
+    {
+        return Err(format!(
+            "{name} frame dimensions do not match grid metadata"
+        ));
+    }
+    if times.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(format!("{name} times must be strictly increasing"));
+    }
+    Ok(())
+}
+
+fn validate_scalar_grid(grid: &ScalarGrid) -> Result<(), String> {
+    let frame_size = grid.n_lat * grid.n_lon;
+    if grid.n_lat < 2
+        || grid.n_lon < 2
+        || grid.times_ms.is_empty()
+        || grid.values.len() != grid.times_ms.len()
+        || grid.values.iter().any(|frame| frame.len() != frame_size)
+    {
+        return Err("wave frame dimensions do not match grid metadata".into());
     }
     Ok(())
 }
@@ -248,6 +478,14 @@ fn positive(value: f64, name: &str) -> Result<f64, String> {
         Ok(value)
     } else {
         Err(format!("{name} must be positive"))
+    }
+}
+
+fn finite(value: f64, name: &str) -> Result<f64, String> {
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(format!("{name} must be finite"))
     }
 }
 
@@ -276,33 +514,215 @@ fn nearest_time_index(times: &[i64], target: i64) -> usize {
         .unwrap_or(0)
 }
 
+fn merged_times(sources: &[WindGrid]) -> Vec<i64> {
+    sources
+        .iter()
+        .flat_map(|source| source.times_ms.iter().copied())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 fn covers(grid: &WindGrid, point: LatLon) -> bool {
-    let lat_max = grid.lat_min + grid.lat_step * (grid.n_lat - 1) as f64;
-    let lon_max = grid.lon_min + grid.lon_step * (grid.n_lon - 1) as f64;
-    point.lat >= grid.lat_min
-        && point.lat <= lat_max
-        && point.lon >= grid.lon_min
-        && point.lon <= lon_max
+    covers_geometry(
+        grid.lat_min,
+        grid.lat_step,
+        grid.lon_min,
+        grid.lon_step,
+        grid.n_lat,
+        grid.n_lon,
+        point,
+    )
 }
 
-fn sample_wind(grid: &WindGrid, point: LatLon, time_index: usize) -> Result<(f64, f64), String> {
-    if !covers(grid, point) {
-        return Err("wind sample is outside grid coverage".into());
+fn covers_geometry(
+    lat_min: f64,
+    lat_step: f64,
+    lon_min: f64,
+    lon_step: f64,
+    n_lat: usize,
+    n_lon: usize,
+    point: LatLon,
+) -> bool {
+    let lat_max = lat_min + lat_step * (n_lat - 1) as f64;
+    let lon_max = lon_min + lon_step * (n_lon - 1) as f64;
+    point.lat >= lat_min && point.lat <= lat_max && point.lon >= lon_min && point.lon <= lon_max
+}
+
+fn covers_any(sources: &[WindGrid], point: LatLon) -> bool {
+    sources.iter().any(|source| covers(source, point))
+}
+
+fn covers_at_time(sources: &[WindGrid], point: LatLon, time_ms: i64) -> bool {
+    sources.iter().any(|source| {
+        covers(source, point)
+            && source
+                .times_ms
+                .first()
+                .is_some_and(|start| *start <= time_ms)
+            && source.times_ms.last().is_some_and(|end| *end >= time_ms)
+    })
+}
+
+fn mean_step_ms(times: &[i64]) -> f64 {
+    if times.len() < 2 {
+        return f64::MAX;
     }
-    Ok((
-        bilinear(&grid.u10[time_index], grid, point) as f64,
-        bilinear(&grid.v10[time_index], grid, point) as f64,
-    ))
+    (times.last().unwrap() - times.first().unwrap()) as f64 / (times.len() - 1) as f64
 }
 
-fn bilinear(frame: &[f32], grid: &WindGrid, point: LatLon) -> f32 {
-    let lat_f = (point.lat - grid.lat_min) / grid.lat_step;
-    let lon_f = (point.lon - grid.lon_min) / grid.lon_step;
-    let lat_i = (lat_f.floor() as isize).clamp(0, grid.n_lat as isize - 2) as usize;
-    let lon_i = (lon_f.floor() as isize).clamp(0, grid.n_lon as isize - 2) as usize;
+fn source_priority(a: &WindGrid, b: &WindGrid) -> Ordering {
+    a.reference_time_ms
+        .cmp(&b.reference_time_ms)
+        .then_with(|| mean_step_ms(&b.times_ms).total_cmp(&mean_step_ms(&a.times_ms)))
+        .then_with(|| b.lat_step.total_cmp(&a.lat_step))
+        .then_with(|| a.mtime_ms.cmp(&b.mtime_ms))
+}
+
+fn select_wind_source(sources: &[WindGrid], point: LatLon, time_ms: i64) -> Option<&WindGrid> {
+    sources
+        .iter()
+        .filter(|source| {
+            covers(source, point)
+                && source
+                    .times_ms
+                    .first()
+                    .is_some_and(|start| *start <= time_ms)
+                && source.times_ms.last().is_some_and(|end| *end >= time_ms)
+        })
+        .max_by(|a, b| source_priority(a, b))
+}
+
+fn sample_selected_wind(
+    sources: &[WindGrid],
+    point: LatLon,
+    time_ms: i64,
+) -> ((f64, f64), Option<String>) {
+    let Some(source) = select_wind_source(sources, point, time_ms) else {
+        return ((0.0, 0.0), None);
+    };
+    let time_index = nearest_time_index(&source.times_ms, time_ms);
+    (
+        (
+            bilinear(
+                &source.u10[time_index],
+                source.lat_min,
+                source.lat_step,
+                source.lon_min,
+                source.lon_step,
+                source.n_lat,
+                source.n_lon,
+                point,
+            ) as f64,
+            bilinear(
+                &source.v10[time_index],
+                source.lat_min,
+                source.lat_step,
+                source.lon_min,
+                source.lon_step,
+                source.n_lat,
+                source.n_lon,
+                point,
+            ) as f64,
+        ),
+        source.source_path.clone(),
+    )
+}
+
+fn sample_selected_wave(sources: &[WindGrid], point: LatLon, time_ms: i64) -> Option<f64> {
+    let source = sources
+        .iter()
+        .filter(|source| {
+            source.wave.is_some()
+                && covers(source, point)
+                && source
+                    .times_ms
+                    .first()
+                    .is_some_and(|start| *start <= time_ms)
+                && source.times_ms.last().is_some_and(|end| *end >= time_ms)
+        })
+        .max_by(|a, b| source_priority(a, b))?;
+    let wave = source.wave.as_ref()?;
+    if !covers_geometry(
+        wave.lat_min,
+        wave.lat_step,
+        wave.lon_min,
+        wave.lon_step,
+        wave.n_lat,
+        wave.n_lon,
+        point,
+    ) {
+        return None;
+    }
+    let index = nearest_time_index(&wave.times_ms, time_ms);
+    let value = bilinear(
+        &wave.values[index],
+        wave.lat_min,
+        wave.lat_step,
+        wave.lon_min,
+        wave.lon_step,
+        wave.n_lat,
+        wave.n_lon,
+        point,
+    ) as f64;
+    (value < 100.0).then_some(value)
+}
+
+fn sample_current(grid: &CurrentGrid, point: LatLon, time_ms: i64) -> (f64, f64) {
+    if !covers_geometry(
+        grid.lat_min,
+        grid.lat_step,
+        grid.lon_min,
+        grid.lon_step,
+        grid.n_lat,
+        grid.n_lon,
+        point,
+    ) {
+        return (0.0, 0.0);
+    }
+    let index = nearest_time_index(&grid.times_ms, time_ms);
+    (
+        bilinear(
+            &grid.u[index],
+            grid.lat_min,
+            grid.lat_step,
+            grid.lon_min,
+            grid.lon_step,
+            grid.n_lat,
+            grid.n_lon,
+            point,
+        ) as f64,
+        bilinear(
+            &grid.v[index],
+            grid.lat_min,
+            grid.lat_step,
+            grid.lon_min,
+            grid.lon_step,
+            grid.n_lat,
+            grid.n_lon,
+            point,
+        ) as f64,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bilinear(
+    frame: &[f32],
+    lat_min: f64,
+    lat_step: f64,
+    lon_min: f64,
+    lon_step: f64,
+    n_lat: usize,
+    n_lon: usize,
+    point: LatLon,
+) -> f32 {
+    let lat_f = (point.lat - lat_min) / lat_step;
+    let lon_f = (point.lon - lon_min) / lon_step;
+    let lat_i = (lat_f.floor() as isize).clamp(0, n_lat as isize - 2) as usize;
+    let lon_i = (lon_f.floor() as isize).clamp(0, n_lon as isize - 2) as usize;
     let t_lat = lat_f - lat_i as f64;
     let t_lon = lon_f - lon_i as f64;
-    let index = |lat: usize, lon: usize| lat * grid.n_lon + lon;
+    let index = |lat: usize, lon: usize| lat * n_lon + lon;
     let a = frame[index(lat_i, lon_i)] as f64;
     let b = frame[index(lat_i + 1, lon_i)] as f64;
     let c = frame[index(lat_i, lon_i + 1)] as f64;
@@ -459,7 +879,8 @@ fn backtrack(
     arrived: usize,
     end: LatLon,
     remaining_nm: f64,
-    wind: &WindGrid,
+    wind_sources: &[WindGrid],
+    times_ms: &[i64],
 ) -> Vec<RoutePoint> {
     let mut indexes = Vec::new();
     let mut current = Some(arrived);
@@ -472,26 +893,33 @@ fn backtrack(
         .into_iter()
         .map(|index| {
             let node = &arena[index];
+            let (resampled, _) = sample_selected_wind(wind_sources, node.position, node.time_ms);
+            let resampled_wind_dir = wind_direction(resampled);
             RoutePoint {
                 lat: node.position.lat,
                 lon: node.position.lon,
                 time_ms: node.time_ms,
                 heading: node.heading,
-                twa: node.twa,
-                tws: node.tws,
+                twa: if node.parent.is_none() {
+                    0.0
+                } else {
+                    true_wind_angle(node.heading, resampled_wind_dir)
+                },
+                tws: wind_speed_knots(resampled),
                 boat_speed: node.boat_speed,
-                propulsion: node.boat_speed.map(|_| "sail"),
-                wind_dir: node.wind_dir,
+                propulsion: node.propulsion,
+                wind_dir: resampled_wind_dir,
                 leg_calc_ms: 0,
-                grib_file_path: wind.source_path.clone(),
+                wave_height: sample_selected_wave(wind_sources, node.position, node.time_ms),
+                grib_file_path: node.grib_file_path.clone(),
             }
         })
         .collect();
     let parent = &arena[arrived];
     let speed = parent.boat_speed.unwrap_or(0.0);
     let arrival_ms = parent.time_ms + ((remaining_nm / speed) * 3_600_000.0).round() as i64;
-    let wind_index = nearest_time_index(&wind.times_ms, arrival_ms);
-    let vector = sample_wind(wind, end, wind_index).unwrap_or((0.0, 0.0));
+    let wind_index = nearest_time_index(times_ms, arrival_ms);
+    let (vector, _) = sample_selected_wind(wind_sources, end, times_ms[wind_index]);
     let wind_dir = wind_direction(vector);
     let heading = bearing_to(parent.position, end);
     route.push(RoutePoint {
@@ -502,10 +930,11 @@ fn backtrack(
         twa: true_wind_angle(heading, wind_dir),
         tws: wind_speed_knots(vector),
         boat_speed: Some(speed),
-        propulsion: Some("sail"),
+        propulsion: parent.propulsion,
         wind_dir,
         leg_calc_ms: 0,
-        grib_file_path: wind.source_path.clone(),
+        wave_height: sample_selected_wave(wind_sources, end, arrival_ms),
+        grib_file_path: parent.grib_file_path.clone(),
     });
     route
 }
@@ -549,6 +978,8 @@ mod tests {
             },
             WindGrid {
                 source_path: Some("fixture.grib2".into()),
+                reference_time_ms: times_ms[0],
+                mtime_ms: 0,
                 times_ms,
                 lat_min: 40.0,
                 lat_step: 0.5,
@@ -558,6 +989,7 @@ mod tests {
                 n_lon: 5,
                 u10: vec![frame; 8],
                 v10: vec![north; 8],
+                wave: None,
             },
         )
     }
@@ -565,7 +997,7 @@ mod tests {
     #[test]
     fn calculates_an_open_water_route() {
         let (request, options, polar, wind) = fixture();
-        let route = calculate(&request, &options, &polar, &wind, |_, _| {}).unwrap();
+        let route = calculate(&request, &options, &polar, &[wind], None, |_, _| {}).unwrap();
         assert_eq!(route.first().unwrap().lat, request.start.lat);
         assert_eq!(route.last().unwrap().lat, request.end.lat);
         assert!(route.len() >= 3);
@@ -576,9 +1008,95 @@ mod tests {
         let (request, options, polar, mut wind) = fixture();
         wind.u10[0].pop();
         assert!(
-            calculate(&request, &options, &polar, &wind, |_, _| {})
+            calculate(&request, &options, &polar, &[wind], None, |_, _| {})
                 .unwrap_err()
                 .contains("dimensions")
         );
+    }
+
+    #[test]
+    fn selects_the_newest_covering_wind_source() {
+        let (request, options, polar, older) = fixture();
+        let mut newer = older.clone();
+        newer.source_path = Some("newer.grib2".into());
+        newer.reference_time_ms += 1;
+        let route =
+            calculate(&request, &options, &polar, &[older, newer], None, |_, _| {}).unwrap();
+        assert_eq!(route[1].grib_file_path.as_deref(), Some("newer.grib2"));
+    }
+
+    #[test]
+    fn applies_current_drift_to_candidate_positions() {
+        let (request, options, polar, wind) = fixture();
+        let frame = vec![1.0; 25];
+        let current = CurrentGrid {
+            times_ms: wind.times_ms.clone(),
+            lat_min: wind.lat_min,
+            lat_step: wind.lat_step,
+            lon_min: wind.lon_min,
+            lon_step: wind.lon_step,
+            n_lat: wind.n_lat,
+            n_lon: wind.n_lon,
+            u: vec![frame.clone(); wind.times_ms.len()],
+            v: vec![vec![0.0; 25]; wind.times_ms.len()],
+        };
+        let route = calculate(
+            &request,
+            &options,
+            &polar,
+            &[wind],
+            Some(&current),
+            |_, _| {},
+        )
+        .unwrap();
+        assert!(
+            route[1..route.len() - 1]
+                .iter()
+                .any(|point| point.lon != 11.0)
+        );
+    }
+
+    #[test]
+    fn motors_when_the_polar_cannot_make_progress() {
+        let (request, mut options, mut polar, wind) = fixture();
+        for row in &mut polar.speeds {
+            row.fill(0.0);
+        }
+        options.motor_speed_kn = Some(5.0);
+        options.force_motor = Some(true);
+        let route = calculate(&request, &options, &polar, &[wind], None, |_, _| {}).unwrap();
+        assert!(
+            route
+                .iter()
+                .skip(1)
+                .all(|point| point.propulsion == Some("motor"))
+        );
+    }
+
+    #[test]
+    fn waits_through_calm_wind_when_enabled() {
+        let (request, mut options, polar, mut wind) = fixture();
+        wind.v10[0].fill(0.0);
+        options.wait_for_wind = Some(true);
+        let route = calculate(&request, &options, &polar, &[wind], None, |_, _| {}).unwrap();
+        assert!(route.iter().any(|point| point.propulsion == Some("wait")));
+    }
+
+    #[test]
+    fn rejects_frontier_when_wave_limit_is_exceeded() {
+        let (request, mut options, polar, mut wind) = fixture();
+        wind.wave = Some(ScalarGrid {
+            times_ms: wind.times_ms.clone(),
+            lat_min: wind.lat_min,
+            lat_step: wind.lat_step,
+            lon_min: wind.lon_min,
+            lon_step: wind.lon_step,
+            n_lat: wind.n_lat,
+            n_lon: wind.n_lon,
+            values: vec![vec![3.0; 25]; wind.times_ms.len()],
+        });
+        options.max_wave_m = Some(2.0);
+        let error = calculate(&request, &options, &polar, &[wind], None, |_, _| {}).unwrap_err();
+        assert!(error.contains("frontier exhausted"));
     }
 }

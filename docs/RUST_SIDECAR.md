@@ -6,17 +6,20 @@ configuration, GRIB discovery, file selection, result storage, and route-quality
 
 ## Current vertical slice
 
-The initial sidecar supports open-water wind routing with:
+The sidecar currently supports open-water routing with:
 
-- bilinear sampling from one Node-prepared wind grid;
+- priority selection across multiple overlapping Node-prepared wind grids;
+- bilinear wind, wave, and current sampling;
 - polar interpolation;
 - candidate heading expansion;
+- wind and wave limits, motor fallback, and wait-for-wind behavior;
+- current-vector drift;
 - two-survivor bearing-sector frontier pruning; and
 - route backtracking and progress events.
 
-It deliberately advertises land avoidance, currents, waves, passage constraints, and navigation
-safety as unsupported. The Node plugin must not select this engine for real routes until those
-capabilities and parity tests exist.
+It deliberately advertises land avoidance, passage constraints, and navigation safety as
+unsupported. The Node plugin must not select this engine for real routes until those capabilities
+and parity tests exist.
 
 ## Process and protocol
 
@@ -52,10 +55,9 @@ cargo run --manifest-path sidecar/Cargo.toml -- --socket /tmp/wayfinder-core.soc
 
 ## Production milestones
 
-1. Add multiple overlapping GRIB sources and memory-mapped grid transport.
-2. Port current and wave sampling.
-3. Port the edge-grid and avoided-region intersection checks.
-4. Port daylight, underway-budget, motoring, and navigation-safety behavior.
-5. Run recorded Node/Rust parity fixtures and performance benchmarks on Linux ARM64.
-6. Package signed x64 and ARM64 sidecar binaries and add Node lifecycle supervision.
-7. Register the Rust engine only after it rejects any request requiring an unsupported feature.
+1. Add memory-mapped grid transport to replace bulk NDJSON arrays.
+2. Port the edge-grid and avoided-region intersection checks.
+3. Port daylight, underway-budget, and navigation-safety behavior.
+4. Run recorded Node/Rust parity fixtures and performance benchmarks on Linux ARM64.
+5. Package signed x64 and ARM64 sidecar binaries and add Node lifecycle supervision.
+6. Register the Rust engine only after it rejects any request requiring an unsupported feature.

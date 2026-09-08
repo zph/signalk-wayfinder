@@ -5,9 +5,10 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import type { GribData, GribFileEntry, PolarData } from '../../types';
+import type { CurrentFileEntry, CurrentGribData, GribData, GribFileEntry, PolarData } from '../../types';
+import { SingleFileCurrentProvider } from '../currentprovider';
 import { RustSidecarClient } from '../routing/rust-sidecar-client';
-import { serializeWindGrid } from '../routing/rust-sidecar-protocol';
+import { serializeCurrentGrid, serializeWindGrid } from '../routing/rust-sidecar-protocol';
 import { IsochroneAlgorithm } from '../routing/isochrone';
 import { MultiFileWindProvider } from '../windprovider';
 
@@ -36,6 +37,9 @@ test('Rust sidecar negotiates capabilities and calculates an open-water route', 
     const hello = await client.hello();
     assert.equal(hello.capabilities.openWaterWind, true);
     assert.equal(hello.capabilities.landAvoidance, false);
+    assert.equal(hello.capabilities.multipleWindSources, true);
+    assert.equal(hello.capabilities.currents, true);
+    assert.equal(hello.capabilities.waves, true);
 
     const times = Array.from({ length: 8 }, (_, index) => new Date(Date.UTC(2024, 0, 1, index)));
     const frameSize = 25;
@@ -71,7 +75,7 @@ test('Rust sidecar negotiates capabilities and calculates an open-water route', 
         },
         options: { arrivalRadiusNm: 1 },
         polar,
-        wind: serializeWindGrid(grib, 'fixture.grib2'),
+        windSources: [serializeWindGrid(grib, 'fixture.grib2')],
       },
       (percent) => progress.push(percent),
     );
@@ -116,6 +120,120 @@ test('Rust sidecar negotiates capabilities and calculates an open-water route', 
     );
     assert.ok(Math.abs(route.at(-1)!.time.getTime() - nodeRoute.route.at(-1)!.time.getTime()) < 1_000);
     assert.equal(route.length, nodeRoute.route.length);
+
+    const selectedSourceRoute = await client.calculate({
+      request: {
+        start: { lat: 41, lon: 11 },
+        end: { lat: 41.2, lon: 11 },
+        departureTimeMs: times[0].getTime(),
+      },
+      options: { arrivalRadiusNm: 1 },
+      polar,
+      windSources: [
+        serializeWindGrid(grib, 'older.grib2', { referenceTime: times[0], mtime: 1 }),
+        serializeWindGrid(grib, 'newer.grib2', { referenceTime: times[1], mtime: 0 }),
+      ],
+    });
+    assert.equal(selectedSourceRoute[1].gribFilePath, 'newer.grib2');
+
+    const waveGrib: GribData = {
+      ...grib,
+      swhByTime: new Map(times.map((time) => [time.getTime(), new Float32Array(frameSize).fill(3)])),
+    };
+    await assert.rejects(
+      client.calculate({
+        request: {
+          start: { lat: 41, lon: 11 },
+          end: { lat: 41.2, lon: 11 },
+          departureTimeMs: times[0].getTime(),
+        },
+        options: { arrivalRadiusNm: 1, maxWaveM: 2 },
+        polar,
+        windSources: [serializeWindGrid(waveGrib, 'waves.grib2')],
+      }),
+      /frontier exhausted/,
+    );
+
+    const currentData: CurrentGribData = {
+      times,
+      latMin: 40,
+      latStep: 0.5,
+      lonMin: 10,
+      lonStep: 0.5,
+      nLat: 5,
+      nLon: 5,
+      u: times.map(() => new Float32Array(frameSize).fill(1)),
+      v: times.map(() => new Float32Array(frameSize)),
+    };
+    const currentEntry: CurrentFileEntry = {
+      meta: {
+        ...entry.meta,
+        path: 'fixture-current.grib2',
+        type: 'current',
+      },
+      data: currentData,
+    };
+    const rustWithCurrent = await client.calculate({
+      request: {
+        start: { lat: 41, lon: 11 },
+        end: { lat: 41.2, lon: 11 },
+        departureTimeMs: times[0].getTime(),
+      },
+      options: { arrivalRadiusNm: 1 },
+      polar,
+      windSources: [serializeWindGrid(grib, 'fixture.grib2')],
+      current: serializeCurrentGrid(currentData),
+    });
+    const nodeWithCurrent = await new IsochroneAlgorithm().calculate(
+      new MultiFileWindProvider([entry]),
+      new SingleFileCurrentProvider(currentEntry),
+      polar,
+      null,
+      null,
+      {
+        start: { lat: 41, lon: 11 },
+        end: { lat: 41.2, lon: 11 },
+        departureTime: times[0].toISOString(),
+      },
+      () => {},
+      { arrivalRadiusNm: 1 },
+    );
+    assert.equal(rustWithCurrent.length, nodeWithCurrent.route.length);
+    assert.ok(
+      Math.abs(rustWithCurrent.at(-1)!.time.getTime() - nodeWithCurrent.route.at(-1)!.time.getTime()) < 1_000,
+    );
+
+    const stoppedPolar: PolarData = {
+      ...polar,
+      speeds: polar.speeds.map((row) => row.map(() => 0)),
+    };
+    const motorOptions = { arrivalRadiusNm: 1, motorSpeedKn: 5, forceMotor: true };
+    const rustMotoring = await client.calculate({
+      request: {
+        start: { lat: 41, lon: 11 },
+        end: { lat: 41.2, lon: 11 },
+        departureTimeMs: times[0].getTime(),
+      },
+      options: motorOptions,
+      polar: stoppedPolar,
+      windSources: [serializeWindGrid(grib, 'fixture.grib2')],
+    });
+    const nodeMotoring = await new IsochroneAlgorithm().calculate(
+      new MultiFileWindProvider([entry]),
+      null,
+      stoppedPolar,
+      null,
+      null,
+      {
+        start: { lat: 41, lon: 11 },
+        end: { lat: 41.2, lon: 11 },
+        departureTime: times[0].toISOString(),
+      },
+      () => {},
+      motorOptions,
+    );
+    assert.equal(rustMotoring.length, nodeMotoring.route.length);
+    assert.ok(rustMotoring.slice(1).every((point) => point.propulsion === 'motor'));
   } finally {
     child.kill('SIGTERM');
     await new Promise<void>((resolve) => child.once('exit', () => resolve()));
