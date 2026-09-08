@@ -5,13 +5,13 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
-use std::{env, process};
+use std::{env, process, time::Instant};
 use wayfinder_core_sidecar::{
     AvoidedRegion, CalculateOptions, CalculateRequest, CurrentGrid, LandEdgeIndex, LatLon, Polar,
     RoutingData, WindGrid, calculate,
 };
 
-const PROTOCOL_VERSION: u32 = 2;
+const PROTOCOL_VERSION: u32 = 3;
 const MAX_REQUEST_BYTES: usize = 512 * 1024 * 1024;
 
 #[derive(Deserialize)]
@@ -26,6 +26,12 @@ struct CalculationInput {
     land: Option<LandEdgeIndex>,
     #[serde(default)]
     avoided_regions: Vec<AvoidedRegion>,
+    #[serde(default = "enabled")]
+    emit_progress: bool,
+}
+
+fn enabled() -> bool {
+    true
 }
 
 #[derive(Deserialize)]
@@ -149,7 +155,9 @@ fn handle(stream: UnixStream) -> std::io::Result<()> {
                     current,
                     land,
                     avoided_regions,
+                    emit_progress,
                 } = *calculation;
+                let started = Instant::now();
                 let outcome = calculate(
                     &request,
                     &options,
@@ -161,16 +169,19 @@ fn handle(stream: UnixStream) -> std::io::Result<()> {
                         avoided_regions: &avoided_regions,
                     },
                     |percent, frontier: &[LatLon]| {
-                        let _ = send(
-                            &mut writer,
-                            json!({ "type": "progress", "protocolVersion": PROTOCOL_VERSION, "requestId": request_id, "percent": percent, "frontier": frontier }),
-                        );
+                        if emit_progress {
+                            let _ = send(
+                                &mut writer,
+                                json!({ "type": "progress", "protocolVersion": PROTOCOL_VERSION, "requestId": request_id, "percent": percent, "frontier": frontier }),
+                            );
+                        }
                     },
                 );
+                let calculation_ms = started.elapsed().as_secs_f64() * 1_000.0;
                 match outcome {
                     Ok(route) => send(
                         &mut writer,
-                        json!({ "type": "result", "protocolVersion": PROTOCOL_VERSION, "requestId": request_id, "route": route }),
+                        json!({ "type": "result", "protocolVersion": PROTOCOL_VERSION, "requestId": request_id, "route": route, "calculationMs": calculation_ms }),
                     )?,
                     Err(message) => error(&mut writer, &request_id, "calculation_failed", &message),
                 }

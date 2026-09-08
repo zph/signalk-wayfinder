@@ -10,7 +10,7 @@ import type {
   RoutePoint,
 } from '../../types';
 
-export const RUST_SIDECAR_PROTOCOL_VERSION = 2;
+export const RUST_SIDECAR_PROTOCOL_VERSION = 3;
 
 export interface RustSidecarCapabilities {
   openWaterWind: boolean;
@@ -110,6 +110,7 @@ export interface RustCalculatePayload {
   current?: RustCurrentGrid;
   land?: RustLandEdgeIndex;
   avoidedRegions?: RustAvoidedRegion[];
+  emitProgress?: boolean;
 }
 
 export type RustSidecarResponse =
@@ -126,6 +127,7 @@ export type RustSidecarResponse =
       protocolVersion: number;
       requestId: string;
       route: Array<Omit<RoutePoint, 'time'> & { timeMs: number }>;
+      calculationMs: number;
     }
   | { type: 'error'; protocolVersion: number; requestId: string; code: string; message: string };
 

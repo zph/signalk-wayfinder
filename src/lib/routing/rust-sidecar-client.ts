@@ -40,7 +40,14 @@ export class RustSidecarClient {
     payload: RustCalculatePayload,
     onProgress: (percent: number, frontier: Array<[number, number]>) => void = () => {},
   ): Promise<RoutePoint[]> {
-    return this.exchange<RoutePoint[]>(
+    return this.calculateDetailed(payload, onProgress).then(({ route }) => route);
+  }
+
+  calculateDetailed(
+    payload: RustCalculatePayload,
+    onProgress: (percent: number, frontier: Array<[number, number]>) => void = () => {},
+  ): Promise<{ route: RoutePoint[]; calculationMs: number }> {
+    return this.exchange<{ route: RoutePoint[]; calculationMs: number }>(
       { type: 'calculate', ...payload },
       (message) => {
         if (message.type === 'progress') {
@@ -53,7 +60,10 @@ export class RustSidecarClient {
         if (message.type !== 'result') return { done: false };
         return {
           done: true,
-          value: message.route.map(({ timeMs, ...point }) => ({ ...point, time: new Date(timeMs) })),
+          value: {
+            route: message.route.map(({ timeMs, ...point }) => ({ ...point, time: new Date(timeMs) })),
+            calculationMs: message.calculationMs,
+          },
         };
       },
     );

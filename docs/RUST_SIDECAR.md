@@ -51,6 +51,9 @@ engine and its synthetic tests remain portable.
 scripts/test-rust-sidecar.sh
 ```
 
+See [RUST_VALIDATION.md](RUST_VALIDATION.md) for the cross-engine regression matrix, repeatable
+performance benchmark, and current baseline.
+
 Run the process manually with:
 
 ```sh

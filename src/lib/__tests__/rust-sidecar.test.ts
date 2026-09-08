@@ -16,6 +16,7 @@ import type {
 } from '../../types';
 import { SingleFileCurrentProvider } from '../currentprovider';
 import { buildLandEdgeIndex, isPointOnLand, segmentCrossesLandFast } from '../landmask';
+import { segmentCrossesRegion } from '../regions';
 import { RustSidecarClient } from '../routing/rust-sidecar-client';
 import {
   serializeAvoidedRegions,
@@ -41,7 +42,7 @@ async function waitForSidecar(client: RustSidecarClient, child: ChildProcess): P
   throw new Error('sidecar did not create its socket');
 }
 
-test('Rust sidecar negotiates capabilities and calculates an open-water route', { skip: !binary }, async () => {
+test('Rust sidecar regression matrix matches the Node isochrone implementation', { skip: !binary }, async () => {
   const directory = await mkdtemp(path.join(tmpdir(), 'wayfinder-rust-sidecar-'));
   const socket = path.join(directory, 'core.sock');
   const child = spawn(path.resolve(binary!), ['--socket', socket], { stdio: ['ignore', 'pipe', 'pipe'] });
@@ -80,7 +81,7 @@ test('Rust sidecar negotiates capabilities and calculates an open-water route', 
       ],
     };
     const progress: number[] = [];
-    const route = await client.calculate(
+    const { route, calculationMs } = await client.calculateDetailed(
       {
         request: {
           start: { lat: 41, lon: 11 },
@@ -98,6 +99,7 @@ test('Rust sidecar negotiates capabilities and calculates an open-water route', 
     assert.equal(route.at(-1)?.lat, 41.2);
     assert.equal(route.at(-1)?.gribFilePath, 'fixture.grib2');
     assert.ok(route.every((point) => point.time instanceof Date));
+    assert.ok(Number.isFinite(calculationMs) && calculationMs >= 0);
     assert.equal(progress.at(-1), 100);
 
     const entry: GribFileEntry = {
@@ -149,6 +151,26 @@ test('Rust sidecar negotiates capabilities and calculates an open-water route', 
       ],
     });
     assert.equal(selectedSourceRoute[1].gribFilePath, 'newer.grib2');
+    const olderEntry: GribFileEntry = { ...entry, meta: { ...entry.meta, path: 'older.grib2', mtime: 1 } };
+    const newerEntry: GribFileEntry = {
+      ...entry,
+      meta: { ...entry.meta, path: 'newer.grib2', mtime: 0, referenceTime: times[1] },
+    };
+    const nodeSelectedSource = await new IsochroneAlgorithm().calculate(
+      new MultiFileWindProvider([olderEntry, newerEntry]),
+      null,
+      polar,
+      null,
+      null,
+      {
+        start: { lat: 41, lon: 11 },
+        end: { lat: 41.2, lon: 11 },
+        departureTime: times[0].toISOString(),
+      },
+      () => {},
+      { arrivalRadiusNm: 1 },
+    );
+    assert.equal(nodeSelectedSource.route[1].gribFilePath, selectedSourceRoute[1].gribFilePath);
 
     const waveGrib: GribData = {
       ...grib,
@@ -166,6 +188,24 @@ test('Rust sidecar negotiates capabilities and calculates an open-water route', 
         windSources: [serializeWindGrid(waveGrib, 'waves.grib2')],
       }),
       /frontier exhausted/,
+    );
+    const waveEntry: GribFileEntry = { ...entry, meta: { ...entry.meta, path: 'waves.grib2' }, data: waveGrib };
+    await assert.rejects(
+      new IsochroneAlgorithm().calculate(
+        new MultiFileWindProvider([waveEntry]),
+        null,
+        polar,
+        null,
+        null,
+        {
+          start: { lat: 41, lon: 11 },
+          end: { lat: 41.2, lon: 11 },
+          departureTime: times[0].toISOString(),
+        },
+        () => {},
+        { arrivalRadiusNm: 1, maxWaveM: 2 },
+      ),
+      /wind too adverse or light/,
     );
 
     const currentData: CurrentGribData = {
@@ -249,6 +289,41 @@ test('Rust sidecar negotiates capabilities and calculates an open-water route', 
     assert.equal(rustMotoring.length, nodeMotoring.route.length);
     assert.ok(rustMotoring.slice(1).every((point) => point.propulsion === 'motor'));
 
+    const calmThenWindy: GribData = {
+      ...grib,
+      v10: grib.v10.map((frame, index) => (index === 0 ? new Float32Array(frameSize) : frame)),
+    };
+    const calmEntry: GribFileEntry = { ...entry, meta: { ...entry.meta, path: 'calm-then-windy.grib2' }, data: calmThenWindy };
+    const waitOptions = { arrivalRadiusNm: 1, waitForWind: true };
+    const rustWait = await client.calculate({
+      request: {
+        start: { lat: 41, lon: 11 },
+        end: { lat: 41.2, lon: 11 },
+        departureTimeMs: times[0].getTime(),
+      },
+      options: waitOptions,
+      polar,
+      windSources: [serializeWindGrid(calmThenWindy, calmEntry.meta.path)],
+    });
+    const nodeWait = await new IsochroneAlgorithm().calculate(
+      new MultiFileWindProvider([calmEntry]),
+      null,
+      polar,
+      null,
+      null,
+      {
+        start: { lat: 41, lon: 11 },
+        end: { lat: 41.2, lon: 11 },
+        departureTime: times[0].toISOString(),
+      },
+      () => {},
+      waitOptions,
+    );
+    assert.equal(rustWait.length, nodeWait.route.length);
+    assert.equal(rustWait[1].propulsion, 'wait');
+    assert.equal(nodeWait.route[1].propulsion, 'wait');
+    assert.ok(Math.abs(rustWait.at(-1)!.time.getTime() - nodeWait.route.at(-1)!.time.getTime()) < 1_000);
+
     const enclosingPolygon: LandPolygon = {
       bboxLatMin: 40.99,
       bboxLatMax: 41.01,
@@ -314,6 +389,60 @@ test('Rust sidecar negotiates capabilities and calculates an open-water route', 
       assert.equal(segmentCrossesLandFast(blockingIndex, previous.lat, previous.lon, point.lat, point.lon), false);
     }
     assert.ok(Math.abs(rustDetour.at(-1)!.time.getTime() - nodeDetour.route.at(-1)!.time.getTime()) <= 3_600_000);
+
+    const blockingRegionIndex: RegionIndex = {
+      regions: new Map([
+        [
+          'blocking-fixture__0',
+          {
+            bboxLatMin: blockingPolygon.bboxLatMin,
+            bboxLatMax: blockingPolygon.bboxLatMax,
+            bboxLonMin: blockingPolygon.bboxLonMin,
+            bboxLonMax: blockingPolygon.bboxLonMax,
+            exterior: blockingPolygon.exterior,
+          },
+        ],
+      ]),
+    };
+    const blockingRegionIds = new Set(['blocking-fixture']);
+    const rustRegionDetour = await client.calculate({
+      request: {
+        start: { lat: 41, lon: 11 },
+        end: { lat: 41.2, lon: 11 },
+        departureTimeMs: times[0].getTime(),
+      },
+      options: { arrivalRadiusNm: 1 },
+      polar,
+      windSources: [serializeWindGrid(grib, 'fixture.grib2')],
+      avoidedRegions: serializeAvoidedRegions(blockingRegionIndex, blockingRegionIds),
+    });
+    const nodeRegionDetour = await new IsochroneAlgorithm().calculate(
+      new MultiFileWindProvider([entry]),
+      null,
+      polar,
+      null,
+      blockingRegionIndex,
+      {
+        start: { lat: 41, lon: 11 },
+        end: { lat: 41.2, lon: 11 },
+        departureTime: times[0].toISOString(),
+        avoidRegionIds: [...blockingRegionIds],
+      },
+      () => {},
+      { arrivalRadiusNm: 1 },
+    );
+    for (let index = 1; index < rustRegionDetour.length; index += 1) {
+      const previous = rustRegionDetour[index - 1];
+      const point = rustRegionDetour[index];
+      assert.equal(
+        segmentCrossesRegion(blockingRegionIndex, blockingRegionIds, previous.lat, previous.lon, point.lat, point.lon),
+        false,
+      );
+    }
+    assert.ok(
+      Math.abs(rustRegionDetour.at(-1)!.time.getTime() - nodeRegionDetour.route.at(-1)!.time.getTime()) <=
+        3_600_000,
+    );
 
     const regionIndex: RegionIndex = {
       regions: new Map([
