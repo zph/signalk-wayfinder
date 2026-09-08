@@ -105,3 +105,11 @@ long profile improved from 7.48 seconds to 0.35 seconds p50 (21.6×), but its un
 contain only two distinct route families. The Rust sidecar's repeated batches took 1.35 seconds and
 3.37 seconds respectively, so shared work in Node is already faster than repeating the search in
 Rust. The route-count limitation must remain visible beside any timing claim.
+
+The next profiling pass fused sector pruning into candidate generation and added adaptive heading
+expansion for routes of at least 250 nautical miles. The benchmark now measures an exact-lattice
+shared search beside the adaptive search. On the long fixture, exact shared search was 0.32 seconds
+p50 and adaptive shared search was 0.21 seconds p50, a further 1.54× gain. The repeated Node batch
+was 7.79 seconds and the repeated Rust batch was 3.54 seconds, making adaptive shared Node 37.1× and
+16.9× faster respectively. Both shared modes returned two distinct routes; the adaptive pair averaged
+1.52 nautical miles apart.

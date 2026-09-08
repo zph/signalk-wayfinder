@@ -41,6 +41,19 @@ The Node engine now reuses data that does not change during candidate expansion:
 The caches preserve the existing interpolation and navigation calculations; no quantized polar or
 position approximation is introduced.
 
+## Adaptive long-route expansion
+
+For direct routes of at least 250 nautical miles, the corridor-guided fine pass evaluates alternating
+members of the configured heading lattice at each unobstructed frontier point. The parity is derived
+from the parent heading, so neighboring survivors collectively cover both halves of the lattice.
+Points whose direct lookahead is blocked by land or an avoided region always retain the complete
+fine-grained lattice. `speculativeHeadingStride: 1` disables this optimization.
+
+Frontier pruning is also fused into candidate generation. A complete route node is allocated only
+when the candidate can enter a sector's deterministic top-two set or is a valid arrival. This keeps
+the same merge order and parent DAG while avoiding allocations for candidates that would immediately
+be discarded.
+
 ## Exploratory performance
 
 In a three-sample warm synthetic 41×41×37 run, requesting ten routes took 3.54 seconds p50 with the
@@ -49,8 +62,9 @@ The shared search returned five routes under the geometric separation rule; one 
 polygon on the opposite side and averaged 21.1 nautical miles from the primary route, while the
 other selected routes averaged 2.7–3.0 nautical miles from it.
 
-In the three-sample 81×81×97 long fixture, repeated attempts took 7.48 seconds p50 and the shared
-search took 0.35 seconds, a 21.6× reduction. Its uniform wind and simple rectangular obstruction
-produce only two meaningfully distinct paths, however. Route count is therefore
+In a paired three-sample 81×81×97 long fixture, the exact-lattice shared search took 0.32 seconds p50
+and adaptive expansion took 0.21 seconds, a further 1.54× improvement. Ten repeated attempts took
+7.79 seconds, making the complete optimized search 37.1× faster. Its uniform wind and simple
+rectangular obstruction produce only two meaningfully distinct paths, however. Route count is therefore
 reported alongside timing: a fast search that pads its result with near-duplicates is not treated
 as success. These are exploratory local measurements, not CI thresholds.

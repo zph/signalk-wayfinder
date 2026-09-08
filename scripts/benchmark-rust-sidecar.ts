@@ -193,11 +193,12 @@ async function calculateNode(): Promise<RoutePoint[]> {
     .route;
 }
 
-async function calculateNodeShared(count: number): Promise<RoutePoint[][]> {
+async function calculateNodeShared(count: number, speculativeHeadingStride?: number): Promise<RoutePoint[][]> {
   const result = await new IsochroneAlgorithm().calculate(windProvider, null, polar, land, null, request, () => {}, {
     ...options,
     sharedAlternativeCount: count,
     coarseToFine: true,
+    ...(speculativeHeadingStride === undefined ? {} : { speculativeHeadingStride }),
   });
   return result.alternatives ?? [result.route];
 }
@@ -287,12 +288,15 @@ async function main(): Promise<void> {
     const batches = [];
     for (const count of batchSizes) {
       await calculateNodeBatch(count);
+      await calculateNodeShared(count, 1);
       await calculateNodeShared(count);
       await calculateRustBatch(client, count);
       const nodeBatchSamples: number[] = [];
+      const nodeExactSharedSamples: number[] = [];
       const nodeSharedSamples: number[] = [];
       const rustBatchSamples: number[] = [];
       let nodeBatchRoutes: RoutePoint[][] = [];
+      let nodeExactSharedRoutes: RoutePoint[][] = [];
       let nodeSharedRoutes: RoutePoint[][] = [];
       let rustBatchRoutes: RoutePoint[][] = [];
       for (let iteration = 0; iteration < batchIterations; iteration += 1) {
@@ -300,28 +304,35 @@ async function main(): Promise<void> {
         nodeBatchRoutes = await calculateNodeBatch(count);
         nodeBatchSamples.push(performance.now() - started);
         started = performance.now();
+        nodeExactSharedRoutes = await calculateNodeShared(count, 1);
+        nodeExactSharedSamples.push(performance.now() - started);
+        started = performance.now();
         nodeSharedRoutes = await calculateNodeShared(count);
         nodeSharedSamples.push(performance.now() - started);
         started = performance.now();
         rustBatchRoutes = await calculateRustBatch(client, count);
         rustBatchSamples.push(performance.now() - started);
       }
-      for (const route of [...nodeBatchRoutes, ...nodeSharedRoutes, ...rustBatchRoutes]) {
+      for (const route of [...nodeBatchRoutes, ...nodeExactSharedRoutes, ...nodeSharedRoutes, ...rustBatchRoutes]) {
         assertCompletedRoute(route);
         assertClearRoute(route, land);
       }
+      if (count > 1) assert.ok(nodeSharedRoutes.length > 1, 'shared search returned no distinct alternative');
       const sharedArrivalDeltaMs = Math.abs(
         nodeSharedRoutes[0].at(-1)!.time.getTime() - nodeRoute.at(-1)!.time.getTime(),
       );
       assert.ok(sharedArrivalDeltaMs <= 3_600_000, `shared arrival time differs by ${sharedArrivalDeltaMs} ms`);
       const nodeBatch = metrics(nodeBatchSamples);
+      const nodeExactShared = metrics(nodeExactSharedSamples);
       const nodeShared = metrics(nodeSharedSamples);
       const rustBatch = metrics(rustBatchSamples);
       batches.push({
         alternatives: count,
         nodeWorkers: resolveAlternativeWorkerCount(count, configuredNodeWorkers),
         node: nodeBatch,
+        nodeExactFineSharedSearch: nodeExactShared,
         nodeCoarseToFineSharedSearch: nodeShared,
+        exactFineSharedRoutesReturned: nodeExactSharedRoutes.length,
         sharedRoutesReturned: nodeSharedRoutes.length,
         minimumSharedRouteSeparationNm: minimumPairwiseSeparationNm(nodeSharedRoutes),
         sharedRouteSeparationFromPrimaryNm: nodeSharedRoutes
@@ -330,6 +341,7 @@ async function main(): Promise<void> {
         rustEndToEnd: rustBatch,
         p50Speedup: nodeBatch.p50Ms / rustBatch.p50Ms,
         p50SharedSearchSpeedup: nodeBatch.p50Ms / nodeShared.p50Ms,
+        p50AdaptiveHeadingSpeedup: nodeExactShared.p50Ms / nodeShared.p50Ms,
       });
     }
     const report = {

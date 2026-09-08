@@ -40,6 +40,7 @@ export class MultiFileWindProvider implements WindProvider {
   // Sorted by selection priority (see file header); the first covering file wins.
   private readonly sortedFiles: GribFileEntry[];
   private readonly timeIndexes = new Map<GribFileEntry, Int32Array>();
+  private lastSelection: { lat: number; lon: number; timeIdx: number; file: GribFileEntry | undefined } | undefined;
 
   constructor(files: GribFileEntry[]) {
     const withGran = files.map((e) => ({ e, ms: meanStepMs(e.data?.times) }));
@@ -75,10 +76,14 @@ export class MultiFileWindProvider implements WindProvider {
 
   // Single pass: returns the highest-priority file covering the point+time, or undefined.
   private selectFile(lat: number, lon: number, timeIdx: number): GribFileEntry | undefined {
+    if (this.lastSelection?.lat === lat && this.lastSelection.lon === lon && this.lastSelection.timeIdx === timeIdx)
+      return this.lastSelection.file;
     const tMs = this.times[timeIdx].getTime();
-    return this.sortedFiles.find(
+    const file = this.sortedFiles.find(
       (e) => coversPoint(e, lat, lon) && e.meta.timeStart.getTime() <= tMs && e.meta.timeEnd.getTime() >= tMs,
     );
+    this.lastSelection = { lat, lon, timeIdx, file };
+    return file;
   }
 
   getWind(lat: number, lon: number, timeIdx: number): WindVector {

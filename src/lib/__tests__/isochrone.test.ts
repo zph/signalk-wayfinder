@@ -292,7 +292,7 @@ test('calculate: one search returns distinct arrival paths for route alternative
   );
 });
 
-test('calculate: coarse-to-fine shared search preserves the primary route and alternatives', async () => {
+test('calculate: coarse-to-fine shared search preserves arrival quality and alternatives', async () => {
   const times = hourlyTimes('2024-01-01T00:00:00Z', 8);
   const request: CalculationRequest = {
     start: { lat: 41, lon: 11 },
@@ -317,14 +317,34 @@ test('calculate: coarse-to-fine shared search preserves the primary route and al
       arrivalRadiusNm: 1,
       sharedAlternativeCount: 5,
       coarseToFine: true,
+      speculativeHeadingStride: 2,
     },
   );
 
   assert.equal(optimized.route.at(-1)?.lat, request.end.lat);
   assert.equal(optimized.route.at(-1)?.lon, request.end.lon);
-  assert.equal(optimized.route.at(-1)?.time.getTime(), baseline.route.at(-1)?.time.getTime());
+  assert.ok(Math.abs(optimized.route.at(-1)!.time.getTime() - baseline.route.at(-1)!.time.getTime()) <= 3_600_000);
   assert.ok(optimized.alternatives && optimized.alternatives.length > 1);
   assert.ok(progress.every((value, index) => index === 0 || value >= progress[index - 1]));
+
+  const exactLattice = await algo.calculate(wind, null, makePolar(), null, null, request, () => {}, {
+    arrivalRadiusNm: 1,
+    sharedAlternativeCount: 5,
+    coarseToFine: true,
+    speculativeHeadingStride: 1,
+  });
+  assert.equal(exactLattice.route.at(-1)?.time.getTime(), baseline.route.at(-1)?.time.getTime());
+
+  const repeated = await algo.calculate(wind, null, makePolar(), null, null, request, () => {}, {
+    arrivalRadiusNm: 1,
+    sharedAlternativeCount: 5,
+    coarseToFine: true,
+    speculativeHeadingStride: 2,
+  });
+  assert.deepEqual(
+    repeated.alternatives?.map((route) => route.map((point) => [point.lat, point.lon, point.time.getTime()])),
+    optimized.alternatives?.map((route) => route.map((point) => [point.lat, point.lon, point.time.getTime()])),
+  );
 });
 
 test('calculate: coarse-to-fine falls back when the coarse heading lattice misses the route', async () => {
