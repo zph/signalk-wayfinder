@@ -31,7 +31,7 @@
     "prepare-land-data": "python3 scripts/prepare-land-data.py",
     "build-hires-land-data:podman": "bash scripts/build-hires-land-data-podman.sh",
     "test": "tsx --test 'src/lib/__tests__/**/*.test.ts'",
-    "benchmark:rust-sidecar": "tsx scripts/benchmark-rust-sidecar.ts",
+    "benchmark:rust-sidecar": "tsc && tsx scripts/benchmark-rust-sidecar.ts",
     "test:arm64": "bash scripts/test-arm64.sh",
     "lint": "eslint src/",
     "format": "prettier --write src/ public/index.html",

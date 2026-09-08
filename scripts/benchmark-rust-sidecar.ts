@@ -4,17 +4,30 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
+import type { Worker } from 'node:worker_threads';
 
 import type { GribData, GribFileEntry, LandPolygon, PolarData, RoutePoint } from '../src/types';
 import { buildLandEdgeIndex, segmentCrossesLandFast } from '../src/lib/landmask';
 import { IsochroneAlgorithm } from '../src/lib/routing/isochrone';
+import { runAlternativeAttempts, resolveAlternativeWorkerCount } from '../src/lib/routing/alternative-worker-runner';
 import { RustSidecarClient } from '../src/lib/routing/rust-sidecar-client';
 import { serializeLandEdgeIndex, serializeWindGrid } from '../src/lib/routing/rust-sidecar-protocol';
+import { optionsForAlternative } from '../src/lib/route-alternatives';
+import { shareGribData } from '../src/lib/shared-grib';
 import { MultiFileWindProvider } from '../src/lib/windprovider';
 
 const iterations = positiveInteger(process.env.WAYFINDER_BENCH_ITERATIONS, 7);
 const warmups = positiveInteger(process.env.WAYFINDER_BENCH_WARMUPS, 2);
+const batchIterations = positiveInteger(process.env.WAYFINDER_BENCH_BATCH_ITERATIONS, 3);
+const configuredNodeWorkers = process.env.WAYFINDER_BENCH_NODE_WORKERS
+  ? positiveInteger(process.env.WAYFINDER_BENCH_NODE_WORKERS, 4)
+  : undefined;
+const batchSizes = (process.env.WAYFINDER_BENCH_BATCHES ?? '1,5,10')
+  .split(',')
+  .map(Number)
+  .filter((value) => Number.isInteger(value) && value >= 1 && value <= 10);
 const binary = path.resolve(process.env.WAYFINDER_RUST_SIDECAR_BIN ?? 'sidecar/target/release/wayfinder-core-sidecar');
+const profile = process.env.WAYFINDER_BENCH_PROFILE === 'long' ? 'long' : 'standard';
 
 function positiveInteger(value: string | undefined, fallback: number): number {
   const parsed = Number(value);
@@ -61,15 +74,19 @@ function assertClearRoute(route: RoutePoint[], land: ReturnType<typeof buildLand
   }
 }
 
-const times = Array.from({ length: 37 }, (_, index) => new Date(Date.UTC(2024, 0, 1, index)));
-const nLat = 41;
-const nLon = 41;
+const times = Array.from({ length: profile === 'long' ? 97 : 37 }, (_, index) =>
+  new Date(Date.UTC(2024, 0, 1, index)),
+);
+const nLat = profile === 'long' ? 81 : 41;
+const nLon = profile === 'long' ? 81 : 41;
+const latMin = profile === 'long' ? 38 : 39;
+const lonMin = profile === 'long' ? 8 : 9;
 const frameSize = nLat * nLon;
 const grib: GribData = {
   times,
-  latMin: 39,
+  latMin,
   latStep: 0.1,
-  lonMin: 9,
+  lonMin,
   lonStep: 0.1,
   nLat,
   nLon,
@@ -81,10 +98,10 @@ const entry: GribFileEntry = {
     path: 'benchmark-wind.grib2',
     mtime: 0,
     type: 'wind',
-    latMin: 39,
-    latMax: 43,
-    lonMin: 9,
-    lonMax: 13,
+    latMin,
+    latMax: latMin + (nLat - 1) * 0.1,
+    lonMin,
+    lonMax: lonMin + (nLon - 1) * 0.1,
     latStep: 0.1,
     lonStep: 0.1,
     timeStart: times[0],
@@ -108,16 +125,19 @@ const polar: PolarData = {
   ],
 };
 const barrier: LandPolygon = {
-  bboxLatMin: 40.8,
-  bboxLatMax: 41.2,
-  bboxLonMin: 10.8,
-  bboxLonMax: 11.2,
-  exterior: new Float64Array([10.8, 40.8, 11.2, 40.8, 11.2, 41.2, 10.8, 41.2]),
+  bboxLatMin: profile === 'long' ? 42.3 : 40.8,
+  bboxLatMax: profile === 'long' ? 42.7 : 41.2,
+  bboxLonMin: profile === 'long' ? 12.3 : 10.8,
+  bboxLonMax: profile === 'long' ? 12.7 : 11.2,
+  exterior:
+    profile === 'long'
+      ? new Float64Array([12.3, 42.3, 12.7, 42.3, 12.7, 42.7, 12.3, 42.7])
+      : new Float64Array([10.8, 40.8, 11.2, 40.8, 11.2, 41.2, 10.8, 41.2]),
 };
 const land = buildLandEdgeIndex([barrier]);
 const request = {
   start: { lat: 40, lon: 10 },
-  end: { lat: 42, lon: 12 },
+  end: profile === 'long' ? { lat: 45, lon: 15 } : { lat: 42, lon: 12 },
   departureTime: times[0].toISOString(),
 };
 const options = {
@@ -154,6 +174,48 @@ async function calculateNode(): Promise<RoutePoint[]> {
       options,
     )
   ).route;
+}
+
+async function calculateNodeBatch(count: number): Promise<RoutePoint[][]> {
+  const outcomes = await runAlternativeAttempts({
+    initialization: {
+      gribEntries: [{ meta: entry.meta, data: shareGribData(grib) }],
+      polar,
+      dataDir: '.',
+      hiresLand: false,
+      routeLandMode: 'base',
+      inlineLandIndex: land,
+      needsShorelineIndex: false,
+      regions: [],
+      request,
+      points: [request.start, request.end],
+    },
+    tasks: Array.from({ length: count }, (_, attempt) => ({
+      attempt,
+      options: optionsForAlternative(options, 'fastest', attempt, count),
+    })),
+    workerCount: resolveAlternativeWorkerCount(count, configuredNodeWorkers),
+    activeWorkers: new Set<Worker>(),
+    onProgress: () => {},
+    workerPath: path.resolve('dist/lib/routing/alternative-worker.js'),
+  });
+  return outcomes.map((outcome) => {
+    if (outcome.error) throw outcome.error;
+    assert.ok(outcome.route);
+    return outcome.route;
+  });
+}
+
+async function calculateRustBatch(client: RustSidecarClient, count: number): Promise<RoutePoint[][]> {
+  return Promise.all(
+    Array.from({ length: count }, async (_, attempt) => {
+      const result = await client.calculateDetailed({
+        ...rustPayload,
+        options: optionsForAlternative(options, 'fastest', attempt, count),
+      });
+      return result.route;
+    }),
+  );
 }
 
 async function main(): Promise<void> {
@@ -196,15 +258,47 @@ async function main(): Promise<void> {
     const node = metrics(nodeSamples);
     const rust = metrics(rustSamples);
     const rustCalculation = metrics(rustCalculationSamples);
+    const batches = [];
+    for (const count of batchSizes) {
+      await calculateNodeBatch(count);
+      await calculateRustBatch(client, count);
+      const nodeBatchSamples: number[] = [];
+      const rustBatchSamples: number[] = [];
+      let nodeBatchRoutes: RoutePoint[][] = [];
+      let rustBatchRoutes: RoutePoint[][] = [];
+      for (let iteration = 0; iteration < batchIterations; iteration += 1) {
+        let started = performance.now();
+        nodeBatchRoutes = await calculateNodeBatch(count);
+        nodeBatchSamples.push(performance.now() - started);
+        started = performance.now();
+        rustBatchRoutes = await calculateRustBatch(client, count);
+        rustBatchSamples.push(performance.now() - started);
+      }
+      for (const route of [...nodeBatchRoutes, ...rustBatchRoutes]) assertClearRoute(route, land);
+      const nodeBatch = metrics(nodeBatchSamples);
+      const rustBatch = metrics(rustBatchSamples);
+      batches.push({
+        alternatives: count,
+        nodeWorkers: resolveAlternativeWorkerCount(count, configuredNodeWorkers),
+        node: nodeBatch,
+        rustEndToEnd: rustBatch,
+        p50Speedup: nodeBatch.p50Ms / rustBatch.p50Ms,
+      });
+    }
     const report = {
       fixture: {
+        profile,
         grid: `${nLat}x${nLon}x${times.length}`,
-        routeDistanceClass: 'approximately 150 nautical miles with a blocking land polygon',
+        routeDistanceClass:
+          profile === 'long'
+            ? 'approximately 375 nautical miles with a blocking land polygon'
+            : 'approximately 150 nautical miles with a blocking land polygon',
         headingStepDeg: options.headingStep,
         sectorSizeDeg: options.sectorSize,
       },
       iterations,
       warmups,
+      batchIterations,
       node,
       rustEndToEnd: rust,
       rustCalculation,
@@ -213,6 +307,7 @@ async function main(): Promise<void> {
       arrivalDeltaSeconds: arrivalDeltaMs / 1_000,
       nodeRoutePoints: nodeRoute.length,
       rustRoutePoints: rustRoute.length,
+      batches,
       note: 'Rust end-to-end timing includes Unix-socket setup plus NDJSON serialization and parsing; calculation timing is measured inside the sidecar with progress emission disabled.',
     };
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
