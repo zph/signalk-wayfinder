@@ -48,3 +48,14 @@ test('wave sampling reuses a nearest timestamp without changing interpolation', 
   assert.equal(getWaveAt(wind, 0.5, 0.5, requestedTime), 13);
   assert.equal(getWaveAt(wind, 0.5, 0.5, requestedTime), 13);
 });
+
+test('wave sampling excludes land sentinel values before interpolation', () => {
+  const wind: GribData = {
+    ...grid,
+    u10: times.map(() => new Float32Array(4)),
+    v10: times.map(() => new Float32Array(4)),
+    swhByTime: new Map([[times[0].getTime(), new Float32Array([2, 2, 2, 9999])]]),
+  };
+
+  assert.equal(getWaveAt(wind, 0.5, 0.5, times[0].getTime()), 2);
+});

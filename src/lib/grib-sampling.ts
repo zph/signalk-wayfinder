@@ -46,6 +46,35 @@ function bilinear(grid: Float32Array, params: GridParams, lat: number, lon: numb
   );
 }
 
+function bilinearWave(grid: Float32Array, params: GridParams, lat: number, lon: number): number | undefined {
+  const prepared = prepareGrid(params);
+  const latF = (lat - params.latMin) * prepared.inverseLatStep;
+  const lonF = (lon - params.lonMin) * prepared.inverseLonStep;
+  const latI = Math.max(0, Math.min(params.nLat - 2, Math.floor(latF)));
+  const lonI = Math.max(0, Math.min(params.nLon - 2, Math.floor(lonF)));
+  const tLat = latF - latI;
+  const tLon = lonF - lonI;
+  const indexes = [
+    prepared.rowOffsets[latI] + lonI,
+    prepared.rowOffsets[latI + 1] + lonI,
+    prepared.rowOffsets[latI] + lonI + 1,
+    prepared.rowOffsets[latI + 1] + lonI + 1,
+  ];
+  const weights = [(1 - tLat) * (1 - tLon), tLat * (1 - tLon), (1 - tLat) * tLon, tLat * tLon];
+  let weighted = 0;
+  let validWeight = 0;
+  for (let index = 0; index < indexes.length; index++) {
+    const value = grid[indexes[index]];
+    // NOAA wave grids use large sentinel values over land. Reject them before interpolation;
+    // checking only the blended result can turn a tiny sentinel weight into a plausible-looking
+    // 20–40 metre wave.
+    if (!Number.isFinite(value) || value < 0 || value >= 100) continue;
+    weighted += value * weights[index];
+    validWeight += weights[index];
+  }
+  return validWeight > 0 ? weighted / validWeight : undefined;
+}
+
 export function getWaveAt(grib: GribData, lat: number, lon: number, timeMs: number): number | undefined {
   if (!grib.swhByTime || grib.swhByTime.size === 0) return undefined;
   let cache = waveTimeCache.get(grib);
@@ -70,8 +99,7 @@ export function getWaveAt(grib: GribData, lat: number, lon: number, timeMs: numb
   const lonMax = gridParams.lonMin + gridParams.lonStep * (gridParams.nLon - 1);
   if (lat < gridParams.latMin || lat > latMax || lon < gridParams.lonMin || lon > lonMax) return undefined;
   if (bestMs === undefined) return undefined;
-  const value = bilinear(grib.swhByTime.get(bestMs)!, gridParams, lat, lon);
-  return value >= 100 ? undefined : value;
+  return bilinearWave(grib.swhByTime.get(bestMs)!, gridParams, lat, lon);
 }
 
 export function getWindAt(grib: GribData, lat: number, lon: number, timeIdx: number): WindVector {
