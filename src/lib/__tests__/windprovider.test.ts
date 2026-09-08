@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { MultiFileWindProvider, nearestIdx } from '../windprovider';
+import { MultiFileWindProvider, nearestIdx, withMaximumTimeStep } from '../windprovider';
 import { GribData, GribFileEntry } from '../../types';
 
 function makeGrib(opts: {
@@ -91,6 +91,20 @@ test('MultiFileWindProvider: merged times axis contains entries from all files',
   assert.strictEqual(provider.times[0].getTime(), t0.getTime());
   assert.strictEqual(provider.times[1].getTime(), t1.getTime());
   assert.strictEqual(provider.times[2].getTime(), t2.getTime());
+});
+
+test('withMaximumTimeStep densifies a coarse forecast without changing sampled wind coverage', () => {
+  const t0 = new Date('2024-01-01T00:00:00Z');
+  const t3 = new Date('2024-01-01T03:00:00Z');
+  const provider = new MultiFileWindProvider([makeEntry(makeGrib({ times: [t0, t3], v: 7 }), 1000)]);
+
+  const routed = withMaximumTimeStep(provider, 0.25);
+
+  assert.strictEqual(routed.times.length, 13);
+  assert.strictEqual(routed.times[1].toISOString(), '2024-01-01T00:15:00.000Z');
+  assert.strictEqual(routed.times.at(-1)?.toISOString(), t3.toISOString());
+  assert.strictEqual(routed.getWind(41, 11, 1).v, 7);
+  assert.strictEqual(routed.coversPointAtTime(41, 11, 11), true);
 });
 
 test('MultiFileWindProvider: getWind returns freshest file when files overlap spatially', () => {

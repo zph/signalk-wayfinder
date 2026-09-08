@@ -20,6 +20,58 @@ export function nearestIdx(times: Date[], t: Date): number {
   return best;
 }
 
+class ResampledWindProvider implements WindProvider {
+  readonly times: Date[];
+  private readonly sourceIndexes: Int32Array;
+
+  constructor(
+    private readonly source: WindProvider,
+    maximumStepHours: number,
+  ) {
+    const maximumStepMs = maximumStepHours * 3_600_000;
+    const first = source.times[0]?.getTime();
+    const last = source.times.at(-1)?.getTime();
+    if (first === undefined || last === undefined || first === last) {
+      this.times = source.times;
+    } else {
+      const values: Date[] = [];
+      for (let time = first; time < last; time += maximumStepMs) values.push(new Date(time));
+      values.push(new Date(last));
+      this.times = values;
+    }
+    this.sourceIndexes = Int32Array.from(this.times, (time) => nearestIdx(source.times, time));
+  }
+
+  getWind(lat: number, lon: number, timeIdx: number): WindVector {
+    return this.source.getWind(lat, lon, this.sourceIndexes[timeIdx]);
+  }
+
+  getFilePathForPoint(lat: number, lon: number, timeIdx: number): string {
+    return this.source.getFilePathForPoint(lat, lon, this.sourceIndexes[timeIdx]);
+  }
+
+  getWave(lat: number, lon: number, time: Date): number | undefined {
+    return this.source.getWave(lat, lon, time);
+  }
+
+  coversPoint(lat: number, lon: number): boolean {
+    return this.source.coversPoint(lat, lon);
+  }
+
+  coversPointAtTime(lat: number, lon: number, timeIdx: number): boolean {
+    return this.source.coversPointAtTime(lat, lon, this.sourceIndexes[timeIdx]);
+  }
+}
+
+export function withMaximumTimeStep(wind: WindProvider, maximumStepHours: number): WindProvider {
+  if (!Number.isFinite(maximumStepHours) || maximumStepHours <= 0 || wind.times.length < 2) return wind;
+  const maximumStepMs = maximumStepHours * 3_600_000;
+  const alreadyFineEnough = wind.times.every(
+    (time, index) => index === 0 || time.getTime() - wind.times[index - 1].getTime() <= maximumStepMs,
+  );
+  return alreadyFineEnough ? wind : new ResampledWindProvider(wind, maximumStepHours);
+}
+
 // Mean interval between consecutive timesteps (ms). Smaller = temporally finer.
 // Single-step files have no measurable granularity and sort as coarsest so multi-step
 // forecasts win granularity ties.

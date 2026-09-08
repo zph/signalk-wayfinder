@@ -29,6 +29,7 @@ import {
   trueWindAngle,
   DEG_TO_RAD,
 } from '../geo';
+import { withMaximumTimeStep } from '../windprovider';
 import { advanceUnderwayBudget, isLegInDaylight, passageDayIndex, solarElevationDeg } from '../passage-constraints';
 import { navigationConstraintViolation, type NavigationConstraints } from '../navigation-safety';
 import { NodeRoutingPhaseProfiler } from './node-phase-profiler';
@@ -263,6 +264,48 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
     options?: Record<string, unknown>,
     navigationSafety?: NavigationSafetyContext,
   ): Promise<{ route: RoutePoint[]; warning?: string; alternatives?: RoutePoint[][] }> {
+    if (options?._adaptiveTimeStep !== true && wind.times.length >= 2) {
+      // Start with the native forecast interval. If land defeats that search, retry the whole
+      // isochrone at half the interval until narrow channels are resolved or the minimum useful
+      // interval is reached. Refining the complete clock keeps every leg duration honest; merely
+      // shortening an intersecting spatial segment would incorrectly charge the original time.
+      const sourceStepHours = Math.max(
+        ...wind.times.slice(1).map((time, index) => (time.getTime() - wind.times[index].getTime()) / 3_600_000),
+      );
+      const requestedMinimumStep = Number(options?.minimumRoutingStepHours ?? 0.1875);
+      const minimumStepHours = Number.isFinite(requestedMinimumStep)
+        ? Math.max(0.0625, requestedMinimumStep)
+        : 0.1875;
+      let maximumStepHours = sourceStepHours;
+      let lastLandResult:
+        | { route: RoutePoint[]; warning?: string; alternatives?: RoutePoint[][] }
+        | undefined;
+      let lastLandError: unknown;
+      while (true) {
+        try {
+          const result = await this.calculate(
+            withMaximumTimeStep(wind, maximumStepHours),
+            current,
+            polar,
+            edgeIndex,
+            regionIndex,
+            request,
+            onProgress,
+            { ...options, _adaptiveTimeStep: true },
+            navigationSafety,
+          );
+          if (!result.warning?.includes('land blocks all paths')) return result;
+          lastLandResult = result;
+        } catch (error) {
+          if (!(error instanceof RoutingError) || error.reason !== 'land') throw error;
+          lastLandError = error;
+        }
+        if (maximumStepHours / 2 + Number.EPSILON < minimumStepHours) break;
+        maximumStepHours /= 2;
+      }
+      if (lastLandResult) return lastLandResult;
+      throw lastLandError;
+    }
     const requestedSharedAlternatives = Math.max(
       1,
       Math.min(10, Math.trunc(Number(options?.sharedAlternativeCount ?? 1))),
