@@ -322,7 +322,13 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
       // nearby destination repeatedly. Refine forced-motor searches so one step
       // cannot jump farther than the arrival circle.
       const poweredArrivalStepHours =
-        forceMotor && motorSpeedKn > 0 ? arrivalRadiusNm / motorSpeedKn : sourceStepHours;
+        forceMotor && motorSpeedKn > 0
+          ? Math.min(
+              arrivalRadiusNm / motorSpeedKn,
+              haversineNM(request.start.lat, request.start.lon, request.end.lat, request.end.lon) /
+                motorSpeedKn,
+            )
+          : sourceStepHours;
       let maximumStepHours = Math.min(
         sourceStepHours,
         Math.max(minimumStepHours, poweredArrivalStepHours),
