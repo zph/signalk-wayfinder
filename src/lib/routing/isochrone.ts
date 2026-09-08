@@ -272,10 +272,10 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
       const sourceStepHours = Math.max(
         ...wind.times.slice(1).map((time, index) => (time.getTime() - wind.times[index].getTime()) / 3_600_000),
       );
-      const requestedMinimumStep = Number(options?.minimumRoutingStepHours ?? 0.1875);
+      const requestedMinimumStep = Number(options?.minimumRoutingStepHours ?? 0.0625);
       const minimumStepHours = Number.isFinite(requestedMinimumStep)
         ? Math.max(0.0625, requestedMinimumStep)
-        : 0.1875;
+        : 0.0625;
       let maximumStepHours = sourceStepHours;
       let lastLandResult:
         | { route: RoutePoint[]; warning?: string; alternatives?: RoutePoint[][] }
