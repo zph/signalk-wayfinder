@@ -257,7 +257,7 @@ module.exports = (app: SignalKApp) => {
       try {
         app.setPluginStatus('Loading land data...');
         const dataDir = pluginDataDir(app);
-        if (hiresLandAvailable()) {
+        if (hiresLandAvailable(dataDir)) {
           app.debug('hires (f-tier) land index detected — using high-resolution data');
           hiresActive = true;
           edgeIndex = loadHiresEdgeIndex(dataDir);

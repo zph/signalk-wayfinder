@@ -43,6 +43,13 @@ function bundledDataDir(): string {
   }
 }
 
+function highResolutionDataDir(dataDir: string): string {
+  const externalEdge = path.join(dataDir, 'edge-index-hires.bin.gz');
+  const externalDilated = path.join(dataDir, 'dilated-edge-index-hires.bin.gz');
+  if (fs.existsSync(externalEdge) && fs.existsSync(externalDilated)) return dataDir;
+  return bundledDataDir();
+}
+
 // Both edge and dilated indices share this binary layout after the 32-byte header:
 //   polygons: per poly → 4×f64BE bbox + u32LE nFloats + 4-byte pad + nFloats×f64 exterior
 //   edge grid: per cell → u32LE key + u32LE n + n×u32LE entries
@@ -135,16 +142,17 @@ export function loadBundledDilatedIndex(dataDir: string): LandEdgeIndex {
   );
 }
 
-export function hiresLandAvailable(): boolean {
+export function hiresLandAvailable(dataDir: string): boolean {
+  const sourceDir = highResolutionDataDir(dataDir);
   return (
-    fs.existsSync(path.join(bundledDataDir(), 'edge-index-hires.bin.gz')) &&
-    fs.existsSync(path.join(bundledDataDir(), 'dilated-edge-index-hires.bin.gz'))
+    fs.existsSync(path.join(sourceDir, 'edge-index-hires.bin.gz')) &&
+    fs.existsSync(path.join(sourceDir, 'dilated-edge-index-hires.bin.gz'))
   );
 }
 
 export function loadHiresEdgeIndex(dataDir: string): LandEdgeIndex {
   return extractAndLoad(
-    path.join(bundledDataDir(), 'edge-index-hires.bin.gz'),
+    path.join(highResolutionDataDir(dataDir), 'edge-index-hires.bin.gz'),
     path.join(dataDir, 'edge-index-hires.bin'),
     EDGE_INDEX_MAGIC,
     EDGE_INDEX_VERSION,
@@ -153,7 +161,7 @@ export function loadHiresEdgeIndex(dataDir: string): LandEdgeIndex {
 
 export function loadHiresDilatedIndex(dataDir: string): LandEdgeIndex {
   return extractAndLoad(
-    path.join(bundledDataDir(), 'dilated-edge-index-hires.bin.gz'),
+    path.join(highResolutionDataDir(dataDir), 'dilated-edge-index-hires.bin.gz'),
     path.join(dataDir, 'dilated-edge-index-hires.bin'),
     DILATED_INDEX_MAGIC,
     DILATED_INDEX_VERSION,

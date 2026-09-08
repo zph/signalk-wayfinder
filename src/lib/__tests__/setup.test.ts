@@ -3,7 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { after, test } from 'node:test';
-import { pluginDataDir } from '../setup';
+import { hiresLandAvailable, pluginDataDir } from '../setup';
 
 const roots: string[] = [];
 
@@ -39,4 +39,15 @@ test('pluginDataDir never overwrites an existing Sail Wayfinder cache', () => {
   assert.equal(pluginDataDir({ config: { configPath } } as never), current);
   assert.equal(fs.readFileSync(path.join(current, 'marker'), 'utf8'), 'current');
   assert.equal(fs.readFileSync(path.join(legacy, 'marker'), 'utf8'), 'legacy');
+});
+
+test('hiresLandAvailable detects a persistent external shoreline pair', () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wayfinder-hires-'));
+  roots.push(dataDir);
+
+  assert.equal(hiresLandAvailable(dataDir), false);
+  fs.writeFileSync(path.join(dataDir, 'edge-index-hires.bin.gz'), 'edge');
+  assert.equal(hiresLandAvailable(dataDir), false);
+  fs.writeFileSync(path.join(dataDir, 'dilated-edge-index-hires.bin.gz'), 'dilated');
+  assert.equal(hiresLandAvailable(dataDir), true);
 });

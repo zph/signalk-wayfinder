@@ -16,7 +16,10 @@
   "signalk": {
     "displayName": "Sail Wayfinder",
     "appIcon": "./wr-icon-128px.png",
-    "screenshots": ["screenshot2.jpg", "route-to-route-demo.png"]
+    "screenshots": [
+      "screenshot2.jpg",
+      "route-to-route-demo.png"
+    ]
   },
   "license": "Apache-2.0",
   "main": "dist/index.js",
@@ -26,6 +29,7 @@
     "watch": "tsc --watch",
     "prepublishOnly": "tsc",
     "prepare-land-data": "python3 scripts/prepare-land-data.py",
+    "install-hires-land-data": "sh scripts/install-hires-land-data.sh",
     "test": "tsx --test 'src/lib/__tests__/**/*.test.ts'",
     "test:arm64": "bash scripts/test-arm64.sh",
     "lint": "eslint src/",
@@ -35,6 +39,7 @@
   "files": [
     "dist/",
     "public/",
+    "scripts/install-hires-land-data.sh",
     "wr-icon-128px.png",
     "route-to-route-demo.png",
     "screenshot2.jpg"

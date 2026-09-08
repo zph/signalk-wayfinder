@@ -76,6 +76,18 @@ docker restart signalk-server
 The plugin appears under **Server → Plugin Config → Sail Wayfinder** in the admin UI.  
 The webapp is at `http://<host>:3000/signalk-wayfinder/`.
 
+For coastal routing where the bundled shoreline tier closes narrow entrances, install the pinned
+full-resolution GSHHG assets in the persistent Signal K volume, then restart the container:
+
+```bash
+docker exec signalk-server \
+  /home/node/.signalk/node_modules/signalk-wayfinder/scripts/install-hires-land-data.sh
+docker restart signalk-server
+```
+
+The same commands work with `podman`. The installer verifies the release checksums and is
+idempotent.
+
 ## Rebuilding after TypeScript changes
 
 Recompile in-place inside the installed package, then reload via the SignalK API:
