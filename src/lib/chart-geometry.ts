@@ -28,7 +28,9 @@ type GeoJsonPolygon = { type: 'Polygon'; coordinates: number[][][] };
 type GeoJsonMultiPolygon = { type: 'MultiPolygon'; coordinates: number[][][][] };
 
 const MAX_TILES = 96;
-const ROUTE_PADDING_DEG = 0.04;
+// Weather routes need room to detour around headlands and through bay entrances. A tiny tile
+// fringe makes every point beyond the fetched rectangle look like uncharted open water.
+const ROUTE_PADDING_DEG = 0.5;
 const MAX_CACHED_TILES = 512;
 const tileCache = new Map<string, Promise<Uint8Array>>();
 
@@ -73,7 +75,7 @@ export function vectorLandCharts(resources: unknown): VectorChartDescriptor[] {
     .sort((a, b) => (a.scale ?? Number.MAX_SAFE_INTEGER) - (b.scale ?? Number.MAX_SAFE_INTEGER));
 }
 
-function routeBounds(points: LatLon[]): [number, number, number, number] {
+export function routeBounds(points: LatLon[]): [number, number, number, number] {
   const lons = points.map((point) => point.lon);
   const lats = points.map((point) => point.lat);
   return [
@@ -82,6 +84,31 @@ function routeBounds(points: LatLon[]): [number, number, number, number] {
     Math.min(180, Math.max(...lons) + ROUTE_PADDING_DEG),
     Math.min(85, Math.max(...lats) + ROUTE_PADDING_DEG),
   ];
+}
+
+function coverageBoundary(bounds: [number, number, number, number]): LandPolygon {
+  const [west, south, east, north] = bounds;
+  return {
+    bboxLatMin: -85,
+    bboxLatMax: 85,
+    bboxLonMin: -180,
+    bboxLonMax: 180,
+    exterior: ring([
+      [-180, -85],
+      [180, -85],
+      [180, 85],
+      [-180, 85],
+    ]),
+    // The fetched route rectangle is the only water hole in this synthetic outside-land polygon.
+    interiors: [
+      ring([
+        [west, south],
+        [east, south],
+        [east, north],
+        [west, north],
+      ]),
+    ],
+  };
 }
 
 function contains(outer: [number, number, number, number], inner: [number, number, number, number]): boolean {
@@ -186,8 +213,9 @@ export async function resolveChartGeometry(
       return tilePolygons;
     }),
   );
-  const polygons = decoded.flat();
-  if (polygons.length === 0) return null;
+  const chartPolygons = decoded.flat();
+  if (chartPolygons.length === 0) return null;
+  const polygons = [...chartPolygons, coverageBoundary(bounds)];
   return {
     index: buildLandEdgeIndex(polygons),
     source: chart.name ?? chart.identifier,

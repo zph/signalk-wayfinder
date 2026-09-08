@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { vectorLandCharts } from '../chart-geometry';
+import { routeBounds, vectorLandCharts } from '../chart-geometry';
+
+test('routeBounds leaves room for coastal detours around the direct passage', () => {
+  assert.deepEqual(routeBounds([{ lat: 38, lon: -122 }, { lat: 37, lon: -121 }]), [-122.5, 36.5, -120.5, 38.5]);
+});
 
 test('vectorLandCharts ranks local large-scale LNDARE vector charts ahead of broad charts', () => {
   const charts = vectorLandCharts({
