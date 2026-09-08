@@ -94,8 +94,8 @@ function nearbyEdges(
   lonMin: number,
   latMax: number,
   lonMax: number,
-): Array<[number, number]> {
-  const edges: Array<[number, number]> = [];
+): Array<[number, number, number]> {
+  const edges: Array<[number, number, number]> = [];
   const seen = new Set<string>();
   const latCellMin = Math.max(-900, Math.floor(latMin / EDGE_CELL_DEG));
   const latCellMax = Math.min(899, Math.floor(latMax / EDGE_CELL_DEG));
@@ -105,9 +105,9 @@ function nearbyEdges(
     for (let lonCell = lonCellMin; lonCell <= lonCellMax; lonCell++) {
       const entries = index.edgeGrid.get(edgeCellKey(latCell, lonCell));
       if (!entries) continue;
-      for (let i = 0; i < entries.length; i += 2) {
-        const pair: [number, number] = [entries[i], entries[i + 1]];
-        const key = `${pair[0]}:${pair[1]}`;
+      for (let i = 0; i < entries.length; i += 3) {
+        const pair: [number, number, number] = [entries[i], entries[i + 1], entries[i + 2]];
+        const key = `${pair[0]}:${pair[1]}:${pair[2]}`;
         if (!seen.has(key)) {
           seen.add(key);
           edges.push(pair);
@@ -145,8 +145,10 @@ export function minimumShoreDistanceAlongSegmentNm(
   const [ax, ay] = projectedPoint(lat1, lon1, referenceLat, referenceLon);
   const [bx, by] = projectedPoint(lat2, lon2, referenceLat, referenceLon);
   let bestSquared = Infinity;
-  for (const [polygonIndex, edgeIndex] of edges) {
-    const ring = index.polygons[polygonIndex].exterior;
+  for (const [polygonIndex, ringIndex, edgeIndex] of edges) {
+    const polygon = index.polygons[polygonIndex];
+    const ring = ringIndex === 0 ? polygon.exterior : polygon.interiors?.[ringIndex - 1];
+    if (!ring) continue;
     const vertexCount = ring.length >> 1;
     const nextIndex = edgeIndex + 1 < vertexCount ? edgeIndex + 1 : 0;
     const [cx, cy] = projectedPoint(ring[edgeIndex * 2 + 1], ring[edgeIndex * 2], referenceLat, referenceLon);

@@ -50,21 +50,23 @@ The land index (GSHHG coastlines) is bundled — no download is needed at instal
 
 By default the plugin uses the GSHHG **h** (high) resolution tier (~1 km coastlines). Full-resolution **f**-tier coastlines (~100 m) are available from [weather-routing-hires-land-data](https://github.com/kristianwiklund/weather-routing-hires-land-data).
 
-For Podman and other persistent Signal K installations, install the pinned full-resolution assets
-into the Signal K data volume:
+For Podman and other persistent Signal K installations, build the full-resolution assets from the
+pinned GSHHG 2.3.7 source archive. The builder preserves interior water rings, which the upstream
+prebuilt v1 index omits:
 
 ```bash
-podman exec signalk-server \
-  /home/node/.signalk/node_modules/signalk-wayfinder/scripts/install-hires-land-data.sh
+npm run build-hires-land-data:podman
+cp data/generated-hires/*-hires.bin.gz \
+  /path/to/signalk-data/plugin-config-data/signalk-wayfinder/
 podman restart signalk-server
 ```
 
-The installer verifies both release assets by SHA-256 and stores them under
-`plugin-config-data/signalk-wayfinder`, outside the replaceable plugin package directory. Wayfinder
-prefers this persistent copy at startup. Set `SIGNALK_CONFIG_DIR` or `WAYFINDER_LAND_DATA_DIR` when
-the container uses nonstandard paths.
-
-To activate: copy `edge-index-hires.bin.gz` and `dilated-edge-index-hires.bin.gz` from that repository into the plugin's `data/` directory alongside the standard index files, then restart SignalK. The plugin detects the files automatically and switches to f-tier land avoidance with no further configuration. When active, the "Land overlay" checkbox in the sidebar is labelled "Land overlay (hires)".
+The builder verifies the source archive by SHA-256 and runs pinned Fiona, Shapely, and NumPy versions
+in an isolated amd64 container, which Podman can run on both Intel and Apple silicon Macs. Wayfinder
+prefers the generated files under `plugin-config-data/signalk-wayfinder`, outside the replaceable
+plugin package directory. Set `WAYFINDER_LAND_OUTPUT_DIR`, `WAYFINDER_LAND_CACHE_DIR`, or
+`WAYFINDER_CONTAINER_RUNTIME` to change the defaults. After restart, Wayfinder detects the files
+automatically and labels the layer checkbox **Land overlay (hires)**.
 
 Open **Server → Plugin Config → Sail Wayfinder** in the SignalK admin UI.
 

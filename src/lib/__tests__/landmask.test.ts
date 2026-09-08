@@ -115,6 +115,26 @@ test('isPointOnLand: point far from polygon → false', () => {
   assert.ok(!isPointOnLand(edgeIdx, -10, -10));
 });
 
+test('land polygon interiors remain navigable water with indexed shoreline edges', () => {
+  const harbor: LandPolygon = {
+    bboxLatMin: 0,
+    bboxLatMax: 4,
+    bboxLonMin: 0,
+    bboxLonMax: 4,
+    exterior: new Float64Array([0, 0, 4, 0, 4, 4, 0, 4, 0, 0]),
+    interiors: [new Float64Array([1, 1, 3, 1, 3, 3, 1, 3, 1, 1])],
+  };
+  const harborIndex = buildLandEdgeIndex([harbor]);
+  const legacyIndex = buildLandIndex([harbor]);
+
+  assert.equal(isPointOnLand(harborIndex, 2, 2), false);
+  assert.equal(isPointOnLand(harborIndex, 0.5, 0.5), true);
+  assert.equal(segmentCrossesLandFast(harborIndex, 2, 1.5, 2, 2.5), false);
+  assert.equal(segmentCrossesLandFast(harborIndex, 2, 0.5, 2, 1.5), true);
+  assert.equal(segmentCrossesLand(legacyIndex, 2, 1.5, 2, 2.5), false);
+  assert.equal(segmentCrossesLand(legacyIndex, 2, 0.5, 2, 1.5), true);
+});
+
 test('land-polygons serialization: exterior Float64Array converts to closed [lon,lat] GeoJSON ring', () => {
   // makeSquarePoly exterior: [1,1, 3,1, 3,3, 1,3, 1,1] interleaved as [lon,lat,...]
   const p = makeSquarePoly();

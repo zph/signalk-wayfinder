@@ -8,10 +8,10 @@ import { LandPolygon, LandEdgeIndex } from '../types';
 import { SignalKApp } from './signalk-app';
 
 export const EDGE_INDEX_MAGIC = 0x4c4e4458; // 'LNDX'
-export const EDGE_INDEX_VERSION = 2; // v2: polygon data included
+export const EDGE_INDEX_VERSION = 3; // v3: polygon interiors and their shoreline edges included
 
 export const DILATED_INDEX_MAGIC = 0x444c4e44; // 'DLND'
-export const DILATED_INDEX_VERSION = 2;
+export const DILATED_INDEX_VERSION = 3;
 
 export function pluginDataDir(app: SignalKApp): string {
   const configPath: string = app.config?.configPath ?? path.join(os.homedir(), '.signalk');
@@ -51,7 +51,8 @@ function highResolutionDataDir(dataDir: string): string {
 }
 
 // Both edge and dilated indices share this binary layout after the 32-byte header:
-//   polygons: per poly → 4×f64BE bbox + u32LE nFloats + 4-byte pad + nFloats×f64 exterior
+//   polygons: per poly → 4×f64BE bbox + u32LE nRings + 4-byte pad,
+//             then per ring → u32LE nFloats + 4-byte pad + nFloats×f64 coordinates
 //   edge grid: per cell → u32LE key + u32LE n + n×u32LE entries
 //   poly grid: per cell → u32LE key + u32LE n + n×u32LE indices
 function parseIndexBuffer(buf: Buffer): LandEdgeIndex {
@@ -66,11 +67,18 @@ function parseIndexBuffer(buf: Buffer): LandEdgeIndex {
     const bboxLatMax = buf.readDoubleBE(off + 8);
     const bboxLonMin = buf.readDoubleBE(off + 16);
     const bboxLonMax = buf.readDoubleBE(off + 24);
-    const nFloats = buf.readUInt32LE(off + 32);
-    off += 40; // 4×f64 + u32 + 4 pad → exterior starts on 8-byte boundary
-    const exterior = new Float64Array(buf.buffer, buf.byteOffset + off, nFloats);
-    off += nFloats * 8;
-    polygons.push({ bboxLatMin, bboxLatMax, bboxLonMin, bboxLonMax, exterior });
+    const nRings = buf.readUInt32LE(off + 32);
+    off += 40;
+    const rings: Float64Array[] = [];
+    for (let ringIndex = 0; ringIndex < nRings; ringIndex++) {
+      const nFloats = buf.readUInt32LE(off);
+      off += 8;
+      rings.push(new Float64Array(buf.buffer, buf.byteOffset + off, nFloats));
+      off += nFloats * 8;
+    }
+    const [exterior, ...interiors] = rings;
+    if (!exterior) throw new Error(`Land polygon ${i} has no exterior ring`);
+    polygons.push({ bboxLatMin, bboxLatMax, bboxLonMin, bboxLonMax, exterior, interiors });
   }
 
   const edgeGrid = new Map<number, Uint32Array>();

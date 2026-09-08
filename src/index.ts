@@ -1210,12 +1210,15 @@ module.exports = (app: SignalKApp) => {
         res.write('{"type":"FeatureCollection","features":[');
         for (let i = 0; i < polys.length; i++) {
           const p = polys[i];
-          const coords: [number, number][] = [];
-          for (let j = 0; j < p.exterior.length; j += 2) coords.push([p.exterior[j], p.exterior[j + 1]]);
-          if (coords.length > 0) coords.push(coords[0]);
+          const rings = [p.exterior, ...(p.interiors ?? [])].map((ring) => {
+            const coords: [number, number][] = [];
+            for (let j = 0; j < ring.length; j += 2) coords.push([ring[j], ring[j + 1]]);
+            if (coords.length > 0) coords.push(coords[0]);
+            return coords;
+          });
           const feature = JSON.stringify({
             type: 'Feature',
-            geometry: { type: 'Polygon', coordinates: [coords] },
+            geometry: { type: 'Polygon', coordinates: rings },
             properties: null,
           });
           res.write(i === 0 ? feature : `,${feature}`);

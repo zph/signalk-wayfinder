@@ -98,6 +98,7 @@ export interface LandPolygon {
   bboxLonMin: number;
   bboxLonMax: number;
   exterior: Float64Array; // interleaved [lon0,lat0, lon1,lat1, ...]
+  interiors?: Float64Array[]; // water rings inside the land polygon
 }
 
 // Spatial grid: cell key = (floor(lat)+90)*360 + (floor(lon)+180)
@@ -107,7 +108,8 @@ export interface LandIndex {
 }
 
 // Edge-tile index for fast segment-crossing checks.
-// edgeGrid: 0.1° cell key → flat Uint32Array of [polyIdx, edgeIdx, polyIdx, edgeIdx, ...].
+// edgeGrid: 0.1° cell key → flat Uint32Array of [polyIdx, ringIdx, edgeIdx, ...].
+// ringIdx 0 is the exterior; positive values address interiors[ringIdx - 1].
 // polyGrid: 1° cell key → polygon indices (same key formula as LandIndex.grid), for isPointOnLand.
 export interface LandEdgeIndex {
   polygons: LandPolygon[];

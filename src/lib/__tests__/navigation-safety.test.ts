@@ -34,6 +34,23 @@ test('segmentStaysWithinShoreDistance rejects a route too far offshore', () => {
   assert.equal(segmentStaysWithinShoreDistance(shoreline, 0.5, 1.5, 1.5, 1.5, 10), false);
 });
 
+test('shore distance includes the boundary of an interior water ring', () => {
+  const harbor = buildLandEdgeIndex([
+    {
+      bboxLatMin: 0,
+      bboxLatMax: 4,
+      bboxLonMin: 0,
+      bboxLonMax: 4,
+      exterior: new Float64Array([0, 0, 4, 0, 4, 4, 0, 4, 0, 0]),
+      interiors: [new Float64Array([1, 1, 3, 1, 3, 3, 1, 3, 1, 1])],
+    },
+  ]);
+  const distance = minimumShoreDistanceAlongSegmentNm(harbor, 2, 2, 2, 2, 100);
+
+  assert.ok(distance !== undefined);
+  assert.ok(Math.abs(distance - 60) < 0.1);
+});
+
 test('navigationConstraintViolation fails closed when depth coverage is absent', () => {
   assert.equal(
     navigationConstraintViolation(

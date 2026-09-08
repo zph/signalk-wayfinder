@@ -39,13 +39,16 @@ GSHHG_FILENAME = f'gshhg-shp-{GSHHG_VERSION}.zip'
 GSHHG_URL      = f'https://www.soest.hawaii.edu/pwessel/gshhg/gshhg-shp-{GSHHG_VERSION}.zip'
 
 EDGE_INDEX_MAGIC      = 0x4C4E4458  # 'LNDX'
-EDGE_INDEX_VERSION    = 2
+EDGE_INDEX_VERSION    = 3
 DILATED_INDEX_MAGIC   = 0x444C4E44  # 'DLND'
-DILATED_INDEX_VERSION = 2
+DILATED_INDEX_VERSION = 3
 
 EDGE_CELL_DEG = 0.1
 
-DATA_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data'))
+DATA_DIR = os.environ.get(
+    'WAYFINDER_LAND_OUTPUT_DIR',
+    os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data')),
+)
 
 
 def log(msg):
@@ -78,18 +81,19 @@ def download_file(url, dest):
 # ---------------------------------------------------------------------------
 
 def _polygon_to_dict(geom):
-    coords = list(geom.exterior.coords)  # [(lon, lat), ...] including closing vertex
-    if len(coords) < 4:
+    exterior = list(geom.exterior.coords)  # [(lon, lat), ...] including closing vertex
+    if len(exterior) < 4:
         return None
-    flat = [v for pt in coords for v in pt]  # [lon0, lat0, lon1, lat1, ...]
-    lons = [pt[0] for pt in coords]
-    lats = [pt[1] for pt in coords]
+    rings = [exterior]
+    rings.extend(list(interior.coords) for interior in geom.interiors if len(interior.coords) >= 4)
+    flat_rings = [[value for point in ring for value in point] for ring in rings]
+    lon_min, lat_min, lon_max, lat_max = geom.bounds
     return {
-        'lat_min': min(lats),
-        'lat_max': max(lats),
-        'lon_min': min(lons),
-        'lon_max': max(lons),
-        'coords': flat,
+        'lat_min': lat_min,
+        'lat_max': lat_max,
+        'lon_min': lon_min,
+        'lon_max': lon_max,
+        'rings': flat_rings,
     }
 
 
@@ -146,7 +150,7 @@ def _edge_cell_key(lat_cell, lon_cell):
     return (lat_cell + 900) * 3600 + ((lon_cell % 3600) + 3600) % 3600
 
 
-def _insert_edge_into_cells(accum, lat1, lon1, lat2, lon2, pi, ei):
+def _insert_edge_into_cells(accum, lat1, lon1, lat2, lon2, pi, ri, ei):
     D = EDGE_CELL_DEG
     lat_cell = math.floor(lat1 / D)
     lon_cell = math.floor(lon1 / D)
@@ -157,9 +161,10 @@ def _insert_edge_into_cells(accum, lat1, lon1, lat2, lon2, pi, ei):
         key = _edge_cell_key(la, lo)
         cell = accum.get(key)
         if cell is None:
-            accum[key] = [pi, ei]
+            accum[key] = [pi, ri, ei]
         else:
             cell.append(pi)
+            cell.append(ri)
             cell.append(ei)
 
     push(lat_cell, lon_cell)
@@ -205,9 +210,6 @@ def build_edge_index(polygons):
     poly_grid  = {}  # cell_key -> [pi, ...]
 
     for pi, poly in enumerate(polygons):
-        coords = poly['coords']
-        nv = len(coords) // 2
-
         # 1° polygon grid
         lat_lo = math.floor(poly['lat_min'])
         lat_hi = math.floor(poly['lat_max'])
@@ -223,13 +225,15 @@ def build_edge_index(polygons):
                     cell.append(pi)
 
         # 0.1° edge grid
-        for ei in range(nv):
-            lon1 = coords[ei * 2]
-            lat1 = coords[ei * 2 + 1]
-            ni   = ei + 1 if ei + 1 < nv else 0
-            lon2 = coords[ni * 2]
-            lat2 = coords[ni * 2 + 1]
-            _insert_edge_into_cells(edge_accum, lat1, lon1, lat2, lon2, pi, ei)
+        for ri, coords in enumerate(poly['rings']):
+            nv = len(coords) // 2
+            for ei in range(nv):
+                lon1 = coords[ei * 2]
+                lat1 = coords[ei * 2 + 1]
+                ni   = ei + 1 if ei + 1 < nv else 0
+                lon2 = coords[ni * 2]
+                lat2 = coords[ni * 2 + 1]
+                _insert_edge_into_cells(edge_accum, lat1, lon1, lat2, lon2, pi, ri, ei)
 
     return edge_accum, poly_grid
 
@@ -243,8 +247,8 @@ def build_edge_index(polygons):
 #
 # Per polygon:
 #   bboxLatMin..bboxLonMax  4 × f64BE
-#   nFloats u32LE  pad u32LE
-#   exterior  nFloats × f64LE
+#   nRings u32LE  pad u32LE
+#   per ring: nFloats u32LE  pad u32LE, coordinates nFloats × f64LE
 #
 # Per edge/poly grid cell:
 #   key u32LE  n u32LE  entries n × u32LE
@@ -258,12 +262,12 @@ def serialize_index(polygons, edge_accum, poly_grid, magic, version):
     buf.write(struct.pack('<IIII', len(polygons), len(edge_accum), len(poly_grid), 0))
 
     for poly in polygons:
-        coords   = poly['coords']
-        n_floats = len(coords)
         buf.write(struct.pack('>dddd',
             poly['lat_min'], poly['lat_max'], poly['lon_min'], poly['lon_max']))
-        buf.write(struct.pack('<II', n_floats, 0))
-        buf.write(np.array(coords, dtype='<f8').tobytes())
+        buf.write(struct.pack('<II', len(poly['rings']), 0))
+        for coords in poly['rings']:
+            buf.write(struct.pack('<II', len(coords), 0))
+            buf.write(np.array(coords, dtype='<f8').tobytes())
 
     for key, entries in edge_accum.items():
         n = len(entries)
@@ -301,9 +305,10 @@ def dilate_polygons(polygons):
     total    = len(polygons)
 
     for i, poly in enumerate(polygons):
-        coords = poly['coords']
-        pairs  = list(zip(coords[0::2], coords[1::2]))
-        geom   = ShapelyPolygon(pairs)
+        exterior = poly['rings'][0]
+        exterior_pairs = list(zip(exterior[0::2], exterior[1::2]))
+        interior_pairs = [list(zip(ring[0::2], ring[1::2])) for ring in poly['rings'][1:]]
+        geom = ShapelyPolygon(exterior_pairs, interior_pairs)
         if geom.is_valid and not geom.is_empty:
             b = geom.buffer(radius_deg)
             if not b.is_empty:
@@ -355,7 +360,7 @@ def main():
     os.makedirs(DATA_DIR, exist_ok=True)
 
     # Step 1: Download
-    zip_path = os.path.join(DATA_DIR, GSHHG_FILENAME)
+    zip_path = os.environ.get('WAYFINDER_GSHHG_ARCHIVE', os.path.join(DATA_DIR, GSHHG_FILENAME))
     if os.path.exists(zip_path) and os.path.getsize(zip_path) > 1_000_000:
         log(f'[1/5] {GSHHG_FILENAME} already present, skipping download')
     else:

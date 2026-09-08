@@ -29,7 +29,7 @@
     "watch": "tsc --watch",
     "prepublishOnly": "tsc",
     "prepare-land-data": "python3 scripts/prepare-land-data.py",
-    "install-hires-land-data": "sh scripts/install-hires-land-data.sh",
+    "build-hires-land-data:podman": "bash scripts/build-hires-land-data-podman.sh",
     "test": "tsx --test 'src/lib/__tests__/**/*.test.ts'",
     "test:arm64": "bash scripts/test-arm64.sh",
     "lint": "eslint src/",
@@ -39,7 +39,8 @@
   "files": [
     "dist/",
     "public/",
-    "scripts/install-hires-land-data.sh",
+    "scripts/build-hires-land-data-podman.sh",
+    "scripts/prepare-land-data.py",
     "wr-icon-128px.png",
     "route-to-route-demo.png",
     "screenshot2.jpg"
