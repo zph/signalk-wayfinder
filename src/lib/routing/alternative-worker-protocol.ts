@@ -1,10 +1,19 @@
-import type { CalculationRequest, GribFileMeta, LatLon, PolarData, RegionRing, RoutePoint } from '../../types';
+import type {
+  CalculationRequest,
+  CurrentGribData,
+  GribData,
+  GribFileMeta,
+  LatLon,
+  PolarData,
+  RegionRing,
+  RoutePoint,
+} from '../../types';
 
 export type WorkerLandMode = 'none' | 'base' | 'dilated';
 
 export interface AlternativeWorkerInitialization {
-  gribEntries: Array<{ meta: GribFileMeta; path: string }>;
-  currentEntry?: { meta: GribFileMeta; path: string };
+  gribEntries: Array<{ meta: GribFileMeta; data: GribData }>;
+  currentEntry?: { meta: GribFileMeta; data: CurrentGribData };
   polar: PolarData;
   dataDir: string;
   hiresLand: boolean;
@@ -13,11 +22,6 @@ export interface AlternativeWorkerInitialization {
   regions: Array<[string, RegionRing]>;
   request: CalculationRequest;
   points: LatLon[];
-  bathymetry?: {
-    path: string;
-    band: number;
-    valueConvention: 'elevation' | 'depth';
-  };
 }
 
 export interface AlternativeWorkerTask {

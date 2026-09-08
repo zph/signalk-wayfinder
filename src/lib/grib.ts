@@ -3,7 +3,8 @@
 import * as fs from 'node:fs/promises';
 import * as nodepath from 'node:path';
 import * as gdal from 'gdal-async';
-import { CurrentGribData, GribData, GribFileMeta, WindVector } from '../types';
+import { CurrentGribData, GribData, GribFileMeta } from '../types';
+export { getCurrentAt, getWaveAt, getWindAt, nearestCurrentTimeIndex, nearestTimeIndex } from './grib-sampling';
 
 export const GRIB_EXTENSIONS = new Set(['.grib2', '.grib', '.grb2', '.grb']);
 
@@ -341,77 +342,6 @@ function flipRows(grid: Float32Array, nLon: number, nLat: number): Float32Array 
   return flipped;
 }
 
-export function getWaveAt(grib: GribData, lat: number, lon: number, timeMs: number): number | undefined {
-  if (!grib.swhByTime || grib.swhByTime.size === 0) return undefined;
-  let bestMs = -1,
-    bestDiff = Infinity;
-  for (const ms of grib.swhByTime.keys()) {
-    const diff = Math.abs(ms - timeMs);
-    if (diff < bestDiff) {
-      bestDiff = diff;
-      bestMs = ms;
-    }
-  }
-  // Use swhGrid when present — wave data may be on a different grid than wind data.
-  const gridParams = grib.swhGrid ?? grib;
-  // Bounds check: bilinear() silently clamps out-of-domain coordinates to edge
-  // values. Return undefined for points outside the wave grid so the router
-  // doesn't act on clamped edge data (BUG-104).
-  const latMax = gridParams.latMin + gridParams.latStep * (gridParams.nLat - 1);
-  const lonMax = gridParams.lonMin + gridParams.lonStep * (gridParams.nLon - 1);
-  if (lat < gridParams.latMin || lat > latMax || lon < gridParams.lonMin || lon > lonMax) return undefined;
-  const v = bilinear(grib.swhByTime.get(bestMs)!, gridParams, lat, lon);
-  // GRIB wave bands use 9999 as a fill value for land/out-of-domain cells.
-  // Bilinear interpolation near land boundaries produces intermediate bogus values.
-  // 100 m is safely above any real significant wave height (~30 m record).
-  return v >= 100 ? undefined : v;
-}
-
-export function getWindAt(grib: GribData, lat: number, lon: number, timeIdx: number): WindVector {
-  const u = bilinear(grib.u10[timeIdx], grib, lat, lon);
-  const v = bilinear(grib.v10[timeIdx], grib, lat, lon);
-  return { u, v };
-}
-
-type GridParams = Pick<GribData, 'latMin' | 'latStep' | 'lonMin' | 'lonStep' | 'nLat' | 'nLon'>;
-
-function bilinear(grid: Float32Array, grib: GridParams, lat: number, lon: number): number {
-  const latF = (lat - grib.latMin) / grib.latStep;
-  const lonF = (lon - grib.lonMin) / grib.lonStep;
-
-  const latI = Math.max(0, Math.min(grib.nLat - 2, Math.floor(latF)));
-  const lonI = Math.max(0, Math.min(grib.nLon - 2, Math.floor(lonF)));
-
-  const tLat = latF - latI;
-  const tLon = lonF - lonI;
-
-  const i00 = latI * grib.nLon + lonI;
-  const i10 = (latI + 1) * grib.nLon + lonI;
-  const i01 = latI * grib.nLon + (lonI + 1);
-  const i11 = (latI + 1) * grib.nLon + (lonI + 1);
-
-  return (
-    (1 - tLat) * (1 - tLon) * grid[i00] +
-    tLat * (1 - tLon) * grid[i10] +
-    (1 - tLat) * tLon * grid[i01] +
-    tLat * tLon * grid[i11]
-  );
-}
-
-export function nearestTimeIndex(grib: GribData, t: Date): number {
-  const ms = t.getTime();
-  let best = 0;
-  let bestDiff = Math.abs(grib.times[0].getTime() - ms);
-  for (let i = 1; i < grib.times.length; i++) {
-    const diff = Math.abs(grib.times[i].getTime() - ms);
-    if (diff < bestDiff) {
-      bestDiff = diff;
-      best = i;
-    }
-  }
-  return best;
-}
-
 export async function loadCurrentGrib(gribPath: string): Promise<CurrentGribData> {
   const ds = await gdal.openAsync(gribPath);
   try {
@@ -495,31 +425,4 @@ async function readCurrentGrib(ds: gdal.Dataset): Promise<CurrentGribData> {
   if (times.length === 0) throw new Error('No complete UOGRD/VOGRD time step pairs found in GRIB2 file');
 
   return { times, latMin, latStep, lonMin, lonStep, nLat, nLon, u, v };
-}
-
-// Bilinear interpolation of ocean current at a point. Returns {u:0,v:0} when outside the
-// current GRIB's spatial domain — explicit out-of-domain check prevents silently returning
-// clamped edge values, which would be wrong for grid boundaries (nautical safety).
-export function getCurrentAt(data: CurrentGribData, lat: number, lon: number, timeIdx: number): WindVector {
-  const latMax = data.latMin + data.latStep * (data.nLat - 1);
-  const lonMax = data.lonMin + data.lonStep * (data.nLon - 1);
-  if (lat < data.latMin || lat > latMax || lon < data.lonMin || lon > lonMax) return { u: 0, v: 0 };
-  return {
-    u: bilinear(data.u[timeIdx], data, lat, lon),
-    v: bilinear(data.v[timeIdx], data, lat, lon),
-  };
-}
-
-export function nearestCurrentTimeIndex(data: CurrentGribData, t: Date): number {
-  const ms = t.getTime();
-  let best = 0;
-  let bestDiff = Math.abs(data.times[0].getTime() - ms);
-  for (let i = 1; i < data.times.length; i++) {
-    const diff = Math.abs(data.times[i].getTime() - ms);
-    if (diff < bestDiff) {
-      bestDiff = diff;
-      best = i;
-    }
-  }
-  return best;
 }

@@ -4,7 +4,7 @@
 // step, with file mtime only as a last-resort tiebreaker. Coverage + selection is one pass.
 
 import { GribFileEntry, WindProvider, WindVector } from '../types';
-import { getWindAt, getWaveAt, nearestTimeIndex } from './grib';
+import { getWindAt, getWaveAt, nearestTimeIndex } from './grib-sampling';
 
 export function nearestIdx(times: Date[], t: Date): number {
   const ms = t.getTime();

@@ -2,13 +2,8 @@
 
 import { parentPort, workerData } from 'node:worker_threads';
 
-// gdal-async's platform binary must be available before importing GRIB readers.
-import '../ensure-gdal-binary';
-
 import type { CurrentProvider, LandEdgeIndex, RegionIndex, RoutePoint } from '../../types';
-import { loadCurrentGrib, loadGrib } from '../grib';
 import { SingleFileCurrentProvider } from '../currentprovider';
-import { loadGdalBathymetry } from '../gdal-bathymetry';
 import { MultiFileWindProvider } from '../windprovider';
 import { loadBundledDilatedIndex, loadBundledEdgeIndex, loadHiresDilatedIndex, loadHiresEdgeIndex } from '../setup';
 import { IsochroneAlgorithm } from './isochrone';
@@ -45,22 +40,12 @@ async function initialize(): Promise<{
   routeLandIndex: LandEdgeIndex | null;
   shorelineIndex: LandEdgeIndex | null;
   regionIndex: RegionIndex | null;
-  depthProvider: Awaited<ReturnType<typeof loadGdalBathymetry>> | null;
 }> {
-  const gribEntries = await Promise.all(
-    initialization.gribEntries.map(async (entry) => ({
-      meta: entry.meta,
-      data: await loadGrib(entry.path),
-    })),
-  );
-  const wind = new MultiFileWindProvider(gribEntries);
+  const wind = new MultiFileWindProvider(initialization.gribEntries);
 
   let current: CurrentProvider | null = null;
   if (initialization.currentEntry) {
-    current = new SingleFileCurrentProvider({
-      meta: initialization.currentEntry.meta,
-      data: await loadCurrentGrib(initialization.currentEntry.path),
-    });
+    current = new SingleFileCurrentProvider(initialization.currentEntry);
   }
 
   let baseLandIndex: LandEdgeIndex | null = null;
@@ -73,21 +58,12 @@ async function initialize(): Promise<{
 
   const regionIndex: RegionIndex | null =
     initialization.regions.length > 0 ? { regions: new Map(initialization.regions) } : null;
-  const depthProvider = initialization.bathymetry
-    ? await loadGdalBathymetry(
-        initialization.bathymetry.path,
-        initialization.bathymetry.band,
-        initialization.bathymetry.valueConvention,
-      )
-    : null;
-
   return {
     wind,
     current,
     routeLandIndex,
     shorelineIndex: initialization.needsShorelineIndex ? baseLandIndex : null,
     regionIndex,
-    depthProvider,
   };
 }
 
@@ -122,7 +98,7 @@ async function main(): Promise<void> {
               frontier,
             }),
           task.options,
-          { shorelineIndex: context.shorelineIndex, depthProvider: context.depthProvider },
+          { shorelineIndex: context.shorelineIndex, depthProvider: null },
         );
         if (result.warning) warnings.push(`Leg ${leg + 1}: ${result.warning}`);
         fullRoute.push(...(leg === 0 ? result.route : result.route.slice(1)));

@@ -1,7 +1,7 @@
 // Ocean current provider: resolves current lookups from a single ocean current GRIB file.
 
 import { CurrentFileEntry, CurrentProvider, GribFileMeta, WindVector } from '../types';
-import { getCurrentAt, nearestCurrentTimeIndex } from './grib';
+import { getCurrentAt, nearestCurrentTimeIndex } from './grib-sampling';
 
 function coversPoint(meta: GribFileMeta, lat: number, lon: number): boolean {
   return lat >= meta.latMin && lat <= meta.latMax && lon >= meta.lonMin && lon <= meta.lonMax;

@@ -20,6 +20,7 @@ import {
   RegionIndex,
   CalculationStatus,
   PluginSettings,
+  RoutePoint,
   RouteQualityReport,
   LatLon,
   DepthProvider,
@@ -67,8 +68,13 @@ import {
   type RouteAlternative,
 } from './lib/route-alternatives';
 import { resolveVesselDraft, STANDARD_DRAFT_PATHS } from './lib/vessel-draft';
-import { resolveAlternativeWorkerCount, runAlternativeAttempts } from './lib/routing/alternative-worker-runner';
+import {
+  resolveAlternativeWorkerCount,
+  runAlternativeAttempts,
+  type AlternativeAttemptOutcome,
+} from './lib/routing/alternative-worker-runner';
 import type { AlternativeWorkerInitialization } from './lib/routing/alternative-worker-protocol';
+import { shareCurrentGribData, shareGribData } from './lib/shared-grib';
 
 const ALGORITHMS: Map<string, RoutingAlgorithm> = new Map([['isochrone', new IsochroneAlgorithm()]]);
 
@@ -780,46 +786,97 @@ module.exports = (app: SignalKApp) => {
           const points: Array<LatLon> = [start, ...waypoints, end];
           const needsShorelineIndex =
             navigationConstraints.minimumShoreDistanceNm > 0 || navigationConstraints.maximumOffshoreDistanceNm > 0;
-          const workerInitialization: AlternativeWorkerInitialization = {
-            gribEntries: loadedEntries.map((entry) => ({ meta: entry.meta, path: entry.meta.path })),
-            ...(activeCurrentProvider
-              ? { currentEntry: { meta: activeCurrentProvider.meta, path: activeCurrentProvider.meta.path } }
-              : {}),
-            polar: routePolar,
-            dataDir: pluginDataDir(app),
-            hiresLand: hiresActive,
-            routeLandMode: !useLandAvoidance ? 'none' : useSafetyMargin ? 'dilated' : 'base',
-            needsShorelineIndex,
-            regions: regionIndex ? Array.from(regionIndex.regions.entries()) : [],
-            request: { ...req.body, start, end, departureTime, waypoints },
-            points,
-            ...(depthProvider && settings?.bathymetryPath
-              ? {
-                  bathymetry: {
-                    path: settings.bathymetryPath,
-                    band: settings.bathymetryBand ?? 1,
-                    valueConvention: settings.bathymetryValueConvention ?? 'elevation',
-                  },
-                }
-              : {}),
-          };
-          const workerCount = resolveAlternativeWorkerCount(attemptCount, settings?.alternativeWorkerCount);
-          app.debug(`Calculating ${attemptCount} route attempt(s) with ${workerCount} worker(s)`);
           const tasks = Array.from({ length: attemptCount }, (_, attempt) => ({
             attempt,
             options: optionsForAlternative(mergedOptions, objective, attempt, requestedCount),
           }));
-          const outcomes = await runAlternativeAttempts({
-            initialization: workerInitialization,
-            tasks,
-            workerCount,
-            activeWorkers: calculationWorkers,
-            onProgress: (progress, frontier) => {
-              if (sequence !== calculationSequence) return;
-              calcStatus = { status: 'calculating', progress, frontier };
-              pushSse({ type: 'progress', progress, frontier });
-            },
-          });
+          let outcomes: AlternativeAttemptOutcome[];
+
+          // gdal-async is not worker-isolate compatible. Numeric bathymetry therefore keeps the
+          // original in-process path; ordinary chart/shoreline routing shares already-loaded GRIB
+          // arrays with workers and never loads GDAL inside a worker.
+          if (navigationConstraints.minimumDepthM > 0) {
+            app.debug('Numeric bathymetry is active; calculating route attempts in-process');
+            const wind = new MultiFileWindProvider(loadedEntries);
+            outcomes = [];
+            for (const task of tasks) {
+              try {
+                const fullRoute: RoutePoint[] = [];
+                const warnings: string[] = [];
+                for (let leg = 0; leg < points.length - 1; leg++) {
+                  const result = await algorithm.calculate(
+                    wind,
+                    activeCurrentProvider,
+                    routePolar,
+                    activeIndex,
+                    regionIndex,
+                    {
+                      ...req.body,
+                      start: points[leg],
+                      end: points[leg + 1],
+                      departureTime: leg === 0 ? departureTime : fullRoute.at(-1)!.time.toISOString(),
+                    },
+                    (pct, frontier) => {
+                      if (sequence !== calculationSequence) throw new Error('Calculation cancelled');
+                      const fraction = (leg + pct / 100) / (points.length - 1);
+                      const progress = ((task.attempt + fraction) / attemptCount) * 100;
+                      calcStatus = { status: 'calculating', progress, frontier };
+                      pushSse({ type: 'progress', progress, frontier });
+                    },
+                    task.options,
+                    { shorelineIndex: edgeIndex, depthProvider },
+                  );
+                  if (result.warning) warnings.push(`Leg ${leg + 1}: ${result.warning}`);
+                  fullRoute.push(...(leg === 0 ? result.route : result.route.slice(1)));
+                }
+                outcomes.push({
+                  attempt: task.attempt,
+                  route: fullRoute,
+                  ...(warnings.length > 0 ? { warning: warnings.join('; ') } : {}),
+                });
+              } catch (error) {
+                if (sequence !== calculationSequence) return;
+                outcomes.push({
+                  attempt: task.attempt,
+                  error: error instanceof Error ? error : new Error(String(error)),
+                });
+              }
+            }
+          } else {
+            const currentEntry = activeCurrentProvider
+              ? currentFiles.find((entry) => entry.meta.path === activeCurrentProvider.meta.path && entry.data !== null)
+              : undefined;
+            const workerInitialization: AlternativeWorkerInitialization = {
+              gribEntries: loadedEntries.map((entry) => ({
+                meta: entry.meta,
+                data: shareGribData(entry.data!),
+              })),
+              ...(currentEntry?.data
+                ? { currentEntry: { meta: currentEntry.meta, data: shareCurrentGribData(currentEntry.data) } }
+                : {}),
+              polar: routePolar,
+              dataDir: pluginDataDir(app),
+              hiresLand: hiresActive,
+              routeLandMode: !useLandAvoidance ? 'none' : useSafetyMargin ? 'dilated' : 'base',
+              needsShorelineIndex,
+              regions: regionIndex ? Array.from(regionIndex.regions.entries()) : [],
+              request: { ...req.body, start, end, departureTime, waypoints },
+              points,
+            };
+            const workerCount = resolveAlternativeWorkerCount(attemptCount, settings?.alternativeWorkerCount);
+            app.debug(`Calculating ${attemptCount} route attempt(s) with ${workerCount} worker(s)`);
+            outcomes = await runAlternativeAttempts({
+              initialization: workerInitialization,
+              tasks,
+              workerCount,
+              activeWorkers: calculationWorkers,
+              onProgress: (progress, frontier) => {
+                if (sequence !== calculationSequence) return;
+                calcStatus = { status: 'calculating', progress, frontier };
+                pushSse({ type: 'progress', progress, frontier });
+              },
+            });
+          }
 
           if (sequence !== calculationSequence) return;
           for (const outcome of outcomes) {
