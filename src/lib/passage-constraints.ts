@@ -1,5 +1,8 @@
 // Time-window helpers for daylight-only and limited-underway-hours routing.
 
+import type { RoutePoint } from '../types';
+import { haversineNM } from './geo';
+
 const DAY_MS = 86_400_000;
 
 export function solarElevationDeg(time: Date, lat: number, lon: number): number {
@@ -89,4 +92,28 @@ export function advanceUnderwayBudget(inputs: {
   }
 
   return { allowed: true, passageDayIndex: passageDayIndex(end, departure), hoursToday };
+}
+
+export function routeUnderwayBudget(route: RoutePoint[], departure: Date, maxHoursPerDay: number): UnderwayBudget {
+  let budget: UnderwayBudget = {
+    allowed: true,
+    passageDayIndex: passageDayIndex(route[0]?.time ?? departure, departure),
+    hoursToday: 0,
+  };
+  for (let index = 1; index < route.length; index++) {
+    const previous = route[index - 1];
+    const point = route[index];
+    if (point.time <= previous.time) continue;
+    budget = advanceUnderwayBudget({
+      start: previous.time,
+      end: point.time,
+      departure,
+      currentDayIndex: budget.passageDayIndex,
+      currentHoursToday: budget.hoursToday,
+      maxHoursPerDay,
+      underway: haversineNM(previous.lat, previous.lon, point.lat, point.lon) > 0.01 && (point.boatSpeed ?? 0) > 0,
+    });
+    if (!budget.allowed) return budget;
+  }
+  return budget;
 }

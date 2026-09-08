@@ -25,7 +25,7 @@ import {
   trueWindAngle,
   DEG_TO_RAD,
 } from '../geo';
-import { advanceUnderwayBudget, isLegInDaylight, solarElevationDeg } from '../passage-constraints';
+import { advanceUnderwayBudget, isLegInDaylight, passageDayIndex, solarElevationDeg } from '../passage-constraints';
 import { navigationConstraintViolation, type NavigationConstraints } from '../navigation-safety';
 
 const DEFAULT_HEADING_STEP = 5;
@@ -147,6 +147,15 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
     const { start, end } = request;
     const departureTime = new Date(request.departureTime);
     const startTimeIdx = nearestIdx(wind.times, departureTime);
+    const passageDepartureTime = new Date(
+      String(options?.passageDepartureTime ?? wind.times[startTimeIdx].toISOString()),
+    );
+    const configuredInitialDay = Number(options?.initialPassageDayIndex);
+    const configuredInitialHours = Number(options?.initialUnderwayHoursToday);
+    const initialPassageDayIndex = Number.isFinite(configuredInitialDay)
+      ? Math.max(0, Math.floor(configuredInitialDay))
+      : passageDayIndex(wind.times[startTimeIdx], passageDepartureTime);
+    const initialUnderwayHoursToday = Number.isFinite(configuredInitialHours) ? Math.max(0, configuredInitialHours) : 0;
     const nSteps = wind.times.length - startTimeIdx - 1;
 
     if (nSteps <= 0) throw new Error('Departure time is at or after the end of the forecast data');
@@ -172,8 +181,8 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
         tws: windSpeedKnots(seedVec.u, seedVec.v),
         boatSpeed: undefined,
         windDir: windDirection(seedVec.u, seedVec.v),
-        passageDayIndex: 0,
-        underwayHoursToday: 0,
+        passageDayIndex: initialPassageDayIndex,
+        underwayHoursToday: initialUnderwayHoursToday,
         stepCalcMs: 0,
         parent: undefined,
       },
@@ -227,7 +236,7 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
         const restBudget = advanceUnderwayBudget({
           start: point.time,
           end: nextTime,
-          departure: departureTime,
+          departure: passageDepartureTime,
           currentDayIndex: point.passageDayIndex,
           currentHoursToday: point.underwayHoursToday,
           maxHoursPerDay,
@@ -258,7 +267,7 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
         const underwayBudget = advanceUnderwayBudget({
           start: point.time,
           end: nextTime,
-          departure: departureTime,
+          departure: passageDepartureTime,
           currentDayIndex: point.passageDayIndex,
           currentHoursToday: point.underwayHoursToday,
           maxHoursPerDay,
@@ -405,7 +414,7 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
             const finalBudget = advanceUnderwayBudget({
               start: nextTime,
               end: finalArrivalTime,
-              departure: departureTime,
+              departure: passageDepartureTime,
               currentDayIndex: underwayBudget.passageDayIndex,
               currentHoursToday: underwayBudget.hoursToday,
               maxHoursPerDay,

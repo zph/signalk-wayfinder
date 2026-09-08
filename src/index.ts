@@ -68,6 +68,7 @@ import {
   type RouteAlternative,
 } from './lib/route-alternatives';
 import { resolveVesselDraft, STANDARD_DRAFT_PATHS } from './lib/vessel-draft';
+import { routeUnderwayBudget } from './lib/passage-constraints';
 import {
   resolveAlternativeWorkerCount,
   runAlternativeAttempts,
@@ -803,6 +804,7 @@ module.exports = (app: SignalKApp) => {
               try {
                 const fullRoute: RoutePoint[] = [];
                 const warnings: string[] = [];
+                let continuationOptions = task.options;
                 for (let leg = 0; leg < points.length - 1; leg++) {
                   const result = await algorithm.calculate(
                     wind,
@@ -823,11 +825,25 @@ module.exports = (app: SignalKApp) => {
                       calcStatus = { status: 'calculating', progress, frontier };
                       pushSse({ type: 'progress', progress, frontier });
                     },
-                    task.options,
+                    continuationOptions,
                     { shorelineIndex: edgeIndex, depthProvider },
                   );
                   if (result.warning) warnings.push(`Leg ${leg + 1}: ${result.warning}`);
                   fullRoute.push(...(leg === 0 ? result.route : result.route.slice(1)));
+                  const passageDeparture = fullRoute[0].time;
+                  const passageBudget = routeUnderwayBudget(
+                    fullRoute,
+                    passageDeparture,
+                    Number(task.options.maxHoursPerDay ?? 0),
+                  );
+                  if (!passageBudget.allowed)
+                    throw new Error('A route leg exceeded the configured daily underway limit');
+                  continuationOptions = {
+                    ...task.options,
+                    passageDepartureTime: passageDeparture.toISOString(),
+                    initialPassageDayIndex: passageBudget.passageDayIndex,
+                    initialUnderwayHoursToday: passageBudget.hoursToday,
+                  };
                 }
                 outcomes.push({
                   attempt: task.attempt,

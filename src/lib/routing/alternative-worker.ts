@@ -4,6 +4,7 @@ import { parentPort, workerData } from 'node:worker_threads';
 
 import type { CurrentProvider, LandEdgeIndex, RegionIndex, RoutePoint } from '../../types';
 import { SingleFileCurrentProvider } from '../currentprovider';
+import { routeUnderwayBudget } from '../passage-constraints';
 import { MultiFileWindProvider } from '../windprovider';
 import { loadBundledDilatedIndex, loadBundledEdgeIndex, loadHiresDilatedIndex, loadHiresEdgeIndex } from '../setup';
 import { IsochroneAlgorithm } from './isochrone';
@@ -77,6 +78,7 @@ async function main(): Promise<void> {
       const fullRoute: RoutePoint[] = [];
       const warnings: string[] = [];
       const legCount = initialization.points.length - 1;
+      let continuationOptions = task.options;
       for (let leg = 0; leg < legCount; leg++) {
         const result = await algorithm.calculate(
           context.wind,
@@ -97,11 +99,24 @@ async function main(): Promise<void> {
               fraction: (leg + pct / 100) / legCount,
               frontier,
             }),
-          task.options,
+          continuationOptions,
           { shorelineIndex: context.shorelineIndex, depthProvider: null },
         );
         if (result.warning) warnings.push(`Leg ${leg + 1}: ${result.warning}`);
         fullRoute.push(...(leg === 0 ? result.route : result.route.slice(1)));
+        const passageDeparture = fullRoute[0].time;
+        const passageBudget = routeUnderwayBudget(
+          fullRoute,
+          passageDeparture,
+          Number(task.options.maxHoursPerDay ?? 0),
+        );
+        if (!passageBudget.allowed) throw new Error('A route leg exceeded the configured daily underway limit');
+        continuationOptions = {
+          ...task.options,
+          passageDepartureTime: passageDeparture.toISOString(),
+          initialPassageDayIndex: passageBudget.passageDayIndex,
+          initialUnderwayHoursToday: passageBudget.hoursToday,
+        };
       }
       post({
         type: 'result',

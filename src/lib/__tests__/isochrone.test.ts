@@ -160,6 +160,35 @@ test('calculate: daily underway limit inserts rest until the next passage day', 
   assert.ok(hoursByDay.size >= 2, 'route should span at least two passage days');
 });
 
+test('calculate: a required waypoint leg inherits the passage-day budget', async () => {
+  const times = hourlyTimes('2024-06-21T06:00:00Z', 31);
+  const departure = times[0];
+  const { route } = await algo.calculate(
+    makeWind(makeGrib(times)),
+    null,
+    makePolar(),
+    null,
+    null,
+    {
+      start: { lat: 41, lon: 11 },
+      end: { lat: 41.05, lon: 11 },
+      departureTime: times[4].toISOString(),
+    },
+    () => {},
+    {
+      maxHoursPerDay: 2,
+      arrivalRadiusNm: 1,
+      passageDepartureTime: departure.toISOString(),
+      initialPassageDayIndex: 0,
+      initialUnderwayHoursToday: 2,
+    },
+  );
+
+  const firstMovingIndex = route.findIndex((point, index) => index > 0 && (point.boatSpeed ?? 0) > 0);
+  assert.ok(firstMovingIndex > 0);
+  assert.ok(route[firstMovingIndex - 1].time >= times[24]);
+});
+
 test('calculate: rejects departure time past GRIB end', async () => {
   const wind = makeWind(makeGrib());
   const polar = makePolar();
