@@ -705,7 +705,9 @@ module.exports = (app: SignalKApp) => {
             error: 'Invalid departureTime — expected ISO 8601 string',
           });
         }
-        if (settings?.autoGribEnabled !== false && req.body?.enabledGribPaths == null) {
+        let autoGribPath: string | undefined;
+        const isHistoricalDeparture = departureMs < Date.now() - 6 * 3_600_000;
+        if (settings?.autoGribEnabled !== false && !isHistoricalDeparture) {
           if (!settings?.gribDir)
             return void res.status(503).json({ error: 'Automatic forecast acquisition requires gribDir' });
           app.setPluginStatus('Acquiring route-specific NOAA GFS forecast...');
@@ -720,6 +722,7 @@ module.exports = (app: SignalKApp) => {
             app.debug(
               `${acquired.cacheHit ? 'Reused' : 'Downloaded'} ${nodepath.basename(acquired.path)} through f${acquired.forecastHours}`,
             );
+            autoGribPath = acquired.path;
             await scanAndIndexGribDir(settings.gribDir);
           } catch (error) {
             return void res.status(503).json({
@@ -735,7 +738,8 @@ module.exports = (app: SignalKApp) => {
         const enabledPaths: string[] | undefined = req.body?.enabledGribPaths;
         const selectedEntries = gribFiles.filter(
           (f) =>
-            f.meta.timeEnd.getTime() >= departureMs && (enabledPaths == null || enabledPaths.includes(f.meta.path)),
+            f.meta.timeEnd.getTime() >= departureMs &&
+            (f.meta.path === autoGribPath || enabledPaths == null || enabledPaths.includes(f.meta.path)),
         );
         if (selectedEntries.length === 0) {
           return void res.status(400).json({
