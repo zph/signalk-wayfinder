@@ -62,7 +62,7 @@ function queryUrl(kind: 'wind' | 'wave', cycle: Date, hour: number, bounds: [num
 async function fetchGrib(url: URL, fetcher: typeof fetch): Promise<Buffer> {
   let currentUrl = url;
   let lastStatus = 0;
-  for (let attempt = 0; attempt < 4; attempt++) {
+  for (let attempt = 0; attempt < 6; attempt++) {
     const response = await fetcher(currentUrl, {
       signal: AbortSignal.timeout(90_000),
       redirect: 'follow',
@@ -87,7 +87,7 @@ async function fetchGrib(url: URL, fetcher: typeof fetch): Promise<Buffer> {
       return data;
     }
     if (response.status !== 429 && response.status < 500 && response.status !== 302) break;
-    await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt));
+    await new Promise((resolve) => setTimeout(resolve, Math.min(8_000, 1_000 * 2 ** attempt)));
   }
   throw new Error(`NOAA forecast request failed after retries: HTTP ${lastStatus}`);
 }
@@ -135,12 +135,33 @@ export async function ensureAutoGrib(
   }
 
   await fs.mkdir(request.gribDir, { recursive: true });
-  const chunks = await mapConcurrent(hours, 2, async (hour) => {
-    const [wind, wave] = await Promise.all([
-      fetchGrib(queryUrl('wind', cycle, hour, bounds), fetcher),
-      fetchGrib(queryUrl('wave', cycle, hour, bounds), fetcher),
-    ]);
-    return Buffer.concat([wind, wave]);
+  const chunkDir = nodepath.join(request.gribDir, '.wayfinder-auto-grib-chunks');
+  await fs.mkdir(chunkDir, { recursive: true });
+  const chunkKey = `${stamp}-${bounds.join('_').replace(/-/g, 'm')}`;
+  const chunks = await mapConcurrent(hours, 1, async (hour) => {
+    const chunkPath = nodepath.join(chunkDir, `${chunkKey}-f${String(hour).padStart(3, '0')}.grib2`);
+    try {
+      const cached = await fs.readFile(chunkPath);
+      if (cached.length >= 32 && cached.subarray(0, 4).toString('ascii') === 'GRIB') return cached;
+    } catch {
+      // Missing or unreadable slice; download it below.
+    }
+    // NOMADS rate-limits bursts of subset requests. Fetch the two model products
+    // serially, persist each completed forecast hour, and pause briefly before
+    // requesting the next one. A retry can then resume instead of starting the
+    // entire 384-hour acquisition again.
+    const wind = await fetchGrib(queryUrl('wind', cycle, hour, bounds), fetcher);
+    const wave = await fetchGrib(queryUrl('wave', cycle, hour, bounds), fetcher);
+    const chunk = Buffer.concat([wind, wave]);
+    const chunkTemp = `${chunkPath}.${process.pid}.${Date.now()}.tmp`;
+    try {
+      await fs.writeFile(chunkTemp, chunk);
+      await fs.rename(chunkTemp, chunkPath);
+    } finally {
+      await fs.unlink(chunkTemp).catch(() => {});
+    }
+    if (fetcher === fetch) await new Promise((resolve) => setTimeout(resolve, 100));
+    return chunk;
   });
   const temp = `${path}.${process.pid}.${Date.now()}.tmp`;
   try {
