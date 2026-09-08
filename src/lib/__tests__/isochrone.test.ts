@@ -88,6 +88,42 @@ test('IsochroneAlgorithm.id is "isochrone"', () => {
   assert.strictEqual(algo.id, 'isochrone');
 });
 
+test('calculate: forced motor refines long forecast steps instead of overshooting a short route', async () => {
+  const times = Array.from(
+    { length: 9 },
+    (_, index) => new Date(new Date('2024-01-01T00:00:00Z').getTime() + index * 3 * 3_600_000),
+  );
+  const wind = makeWind(makeGrib(times));
+  const { route } = await algo.calculate(
+    wind,
+    null,
+    makePolar(),
+    null,
+    null,
+    {
+      start: { lat: 41, lon: 11 },
+      end: { lat: 41, lon: 11.2 },
+      departureTime: times[0].toISOString(),
+    },
+    () => {},
+    { forceMotor: true, motorSpeedKn: 5, arrivalRadiusNm: 1, sharedAlternativeCount: 1 },
+  );
+
+  const elapsedHours =
+    (route.at(-1)!.time.getTime() - route[0].time.getTime()) / 3_600_000;
+  const distanceNm = route
+    .slice(1)
+    .reduce(
+      (total, point, index) =>
+        total + haversineNM(route[index].lat, route[index].lon, point.lat, point.lon),
+      0,
+    );
+  assert.ok(elapsedHours < 3, `expected a direct short passage, got ${elapsedHours} h`);
+  assert.ok(distanceNm < 12, `expected little detour, got ${distanceNm} nm`);
+  assert.equal(route.at(-1)?.lat, 41);
+  assert.equal(route.at(-1)?.lon, 11.2);
+});
+
 function hourlyTimes(start: string, count: number): Date[] {
   const startMs = new Date(start).getTime();
   return Array.from({ length: count }, (_, index) => new Date(startMs + index * 3_600_000));

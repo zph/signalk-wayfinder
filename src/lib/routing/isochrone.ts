@@ -311,7 +311,22 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
       const minimumStepHours = Number.isFinite(requestedMinimumStep)
         ? Math.max(0.0625, requestedMinimumStep)
         : 0.0625;
-      let maximumStepHours = sourceStepHours;
+      const forceMotor = options?.forceMotor === true;
+      const motorSpeedKn = Number(options?.motorSpeedKn ?? 0);
+      const arrivalRadiusNm = Math.max(
+        0.1,
+        Number(options?.arrivalRadiusNm ?? DEFAULT_ARRIVAL_RADIUS_NM),
+      );
+      // A forecast interval can be much longer than a short powered passage. At
+      // five knots a three-hour GFS step travels 15 nm, which can overshoot a
+      // nearby destination repeatedly. Refine forced-motor searches so one step
+      // cannot jump farther than the arrival circle.
+      const poweredArrivalStepHours =
+        forceMotor && motorSpeedKn > 0 ? arrivalRadiusNm / motorSpeedKn : sourceStepHours;
+      let maximumStepHours = Math.min(
+        sourceStepHours,
+        Math.max(minimumStepHours, poweredArrivalStepHours),
+      );
       let lastLandResult:
         | { route: RoutePoint[]; warning?: string; alternatives?: RoutePoint[][] }
         | undefined;
