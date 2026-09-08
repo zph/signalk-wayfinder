@@ -1,5 +1,10 @@
 # Sail Wayfinder
 
+> **Fork notice:** Sail Wayfinder is a fork of Kristian Wiklund's upstream
+> [Signal K Weather Routing](https://github.com/kristianwiklund/signalk-weather-routing) project. Thank
+> you to Kristian and all upstream contributors for their work. This fork aims to remove the manual
+> steps from the weather-routing workflow and integrate it with Binnacle for a nicer user interface.
+
 > [!CAUTION]
 > ⚠️ **Experimental — read before use.** ⚠️
 >
