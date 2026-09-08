@@ -4,6 +4,7 @@ import {
   CurrentProvider,
   WindProvider,
   LandEdgeIndex,
+  LatLon,
   RegionIndex,
   PolarData,
   CalculationRequest,
@@ -20,6 +21,9 @@ import {
   haversineNM,
   bearingTo,
   destinationPoint,
+  destinationPointPrepared,
+  prepareHeading,
+  type PreparedHeading,
   windSpeedKnots,
   windDirection,
   trueWindAngle,
@@ -27,6 +31,7 @@ import {
 } from '../geo';
 import { advanceUnderwayBudget, isLegInDaylight, passageDayIndex, solarElevationDeg } from '../passage-constraints';
 import { navigationConstraintViolation, type NavigationConstraints } from '../navigation-safety';
+import { NodeRoutingPhaseProfiler } from './node-phase-profiler';
 
 const DEFAULT_HEADING_STEP = 5;
 const DEFAULT_SECTOR_SIZE = 1;
@@ -44,6 +49,42 @@ const FINE_PASS_CONE_HALF_ANGLE = 100;
 const CONE_DISABLE_LOOKAHEAD_NM = 100;
 const MAX_HEADING_CHANGE = 120;
 const MIN_SHARED_ALTERNATIVE_SEPARATION_NM = 0.25;
+const DEFAULT_COARSE_HEADING_STEP = 10;
+const DEFAULT_COARSE_SECTOR_SIZE = 2;
+const DEFAULT_CORRIDOR_WIDTH_NM = 30;
+const MAX_POLAR_HEADING_CACHE_ENTRIES = 128;
+
+interface RoutingCorridorPoint extends LatLon {
+  timeMs: number;
+}
+
+function routingCorridor(value: unknown): RoutingCorridorPoint[] | null {
+  if (!Array.isArray(value) || value.length < 2) return null;
+  const points = value.filter(
+    (point): point is RoutingCorridorPoint =>
+      typeof point === 'object' &&
+      point !== null &&
+      Number.isFinite((point as RoutingCorridorPoint).lat) &&
+      Number.isFinite((point as RoutingCorridorPoint).lon) &&
+      Number.isFinite((point as RoutingCorridorPoint).timeMs),
+  );
+  return points.length >= 2 ? points : null;
+}
+
+function prepareCorridorAnchors(times: Date[], corridor: RoutingCorridorPoint[] | null): Array<LatLon | null> {
+  if (!corridor) return times.map(() => null);
+  let corridorIndex = 0;
+  return times.map((time) => {
+    while (
+      corridorIndex + 1 < corridor.length &&
+      Math.abs(corridor[corridorIndex + 1].timeMs - time.getTime()) <=
+        Math.abs(corridor[corridorIndex].timeMs - time.getTime())
+    ) {
+      corridorIndex++;
+    }
+    return corridor[corridorIndex];
+  });
+}
 
 interface StepTiming {
   step: number;
@@ -122,6 +163,84 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
     options?: Record<string, unknown>,
     navigationSafety?: NavigationSafetyContext,
   ): Promise<{ route: RoutePoint[]; warning?: string; alternatives?: RoutePoint[][] }> {
+    const requestedSharedAlternatives = Math.max(
+      1,
+      Math.min(10, Math.trunc(Number(options?.sharedAlternativeCount ?? 1))),
+    );
+    if (options?.coarseToFine === true && !routingCorridor(options?._routingCorridor)) {
+      const coarseHeadingStep = Math.max(
+        Number(options?.headingStep ?? DEFAULT_HEADING_STEP),
+        Number(options?.coarseHeadingStep ?? DEFAULT_COARSE_HEADING_STEP),
+      );
+      const coarseSectorSize = Math.max(
+        Number(options?.sectorSize ?? DEFAULT_SECTOR_SIZE),
+        Number(options?.coarseSectorSize ?? DEFAULT_COARSE_SECTOR_SIZE),
+      );
+      try {
+        const coarse = await this.calculate(
+          wind,
+          current,
+          polar,
+          edgeIndex,
+          regionIndex,
+          request,
+          (percent, frontier) => onProgress(percent * 0.15, frontier),
+          {
+            ...options,
+            headingStep: coarseHeadingStep,
+            sectorSize: coarseSectorSize,
+            sharedAlternativeCount: 1,
+            coarseToFine: false,
+            _profileStage: 'coarse',
+          },
+          navigationSafety,
+        );
+        const coarseEnd = coarse.route.at(-1);
+        if (!coarse.warning && coarseEnd?.lat === request.end.lat && coarseEnd.lon === request.end.lon) {
+          const fine = await this.calculate(
+            wind,
+            current,
+            polar,
+            edgeIndex,
+            regionIndex,
+            request,
+            (percent, frontier) => onProgress(15 + percent * 0.85, frontier),
+            {
+              ...options,
+              coarseToFine: false,
+              sharedAlternativeCount: requestedSharedAlternatives,
+              _profileStage: 'fine',
+              _routingCorridor: coarse.route.map((point) => ({
+                lat: point.lat,
+                lon: point.lon,
+                timeMs: point.time.getTime(),
+              })),
+            },
+            navigationSafety,
+          );
+          const fineEnd = fine.route.at(-1);
+          if (!fine.warning && fineEnd?.lat === request.end.lat && fineEnd.lon === request.end.lon) return fine;
+        }
+      } catch {
+        // The approximation may fail even when the full-resolution search can find a route.
+      }
+      return this.calculate(
+        wind,
+        current,
+        polar,
+        edgeIndex,
+        regionIndex,
+        request,
+        (percent, frontier) => onProgress(15 + percent * 0.85, frontier),
+        {
+          ...options,
+          coarseToFine: false,
+          sharedAlternativeCount: requestedSharedAlternatives,
+          _profileStage: 'full-fallback',
+        },
+        navigationSafety,
+      );
+    }
     const headingStep = Number(options?.headingStep ?? DEFAULT_HEADING_STEP);
     const sectorSize = Number(options?.sectorSize ?? DEFAULT_SECTOR_SIZE);
     const minBoatSpeed = Number(options?.minBoatSpeed ?? DEFAULT_MIN_BOAT_SPEED);
@@ -139,7 +258,16 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
     const configuredConeHalfAngle = Number(options?.coneHalfAngle ?? FINE_PASS_CONE_HALF_ANGLE);
     const coneDisableLookaheadNm = Number(options?.coneDisableLookaheadNm ?? CONE_DISABLE_LOOKAHEAD_NM);
     const maxHeadingChangeDeg = Number(options?.maxHeadingChange ?? MAX_HEADING_CHANGE);
-    const sharedAlternativeCount = Math.max(1, Math.min(10, Math.trunc(Number(options?.sharedAlternativeCount ?? 1))));
+    const sharedAlternativeCount = requestedSharedAlternatives;
+    const requestedCorridorWidthNm = Number(options?.corridorWidthNm ?? DEFAULT_CORRIDOR_WIDTH_NM);
+    const corridorWidthNm = Number.isFinite(requestedCorridorWidthNm)
+      ? Math.max(1, requestedCorridorWidthNm)
+      : DEFAULT_CORRIDOR_WIDTH_NM;
+    const headings: PreparedHeading[] = [];
+    for (let rawHeading = headingOffsetDeg; rawHeading < 360 + headingOffsetDeg; rawHeading += headingStep) {
+      headings.push(prepareHeading(((rawHeading % 360) + 360) % 360));
+    }
+    const polarHeadingCache = new Map<string, { twa: Float64Array; speed: Float64Array }>();
     const navigationConstraints: NavigationConstraints = {
       minimumDepthM: Number(options?.minimumDepthM ?? 0),
       minimumShoreDistanceNm: Number(options?.minimumShoreDistanceNm ?? 0),
@@ -159,8 +287,20 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
       : passageDayIndex(wind.times[startTimeIdx], passageDepartureTime);
     const initialUnderwayHoursToday = Number.isFinite(configuredInitialHours) ? Math.max(0, configuredInitialHours) : 0;
     const nSteps = wind.times.length - startTimeIdx - 1;
+    const preparedCorridor = prepareCorridorAnchors(wind.times, routingCorridor(options?._routingCorridor));
 
     if (nSteps <= 0) throw new Error('Departure time is at or after the end of the forecast data');
+
+    const phaseProfiler = new NodeRoutingPhaseProfiler({
+      attempt: Number(options?._profileAttempt ?? 0),
+      stage: String(options?._profileStage ?? 'full'),
+      start,
+      end,
+      stepsAvailable: nSteps,
+      headingStepDeg: headingStep,
+      sectorSizeDeg: sectorSize,
+    });
+    const profiling = phaseProfiler.enabled;
 
     const avoidIds = new Set(request.avoidRegionIds ?? []);
 
@@ -204,6 +344,7 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
 
     for (let step = startTimeIdx; step < wind.times.length - 1; step++) {
       const stepStart = performance.now();
+      phaseProfiler.startStep(step, isochrone.length);
       const nextTime = wind.times[step + 1];
       const dtHours = (nextTime.getTime() - wind.times[step].getTime()) / 3_600_000;
       const candidates: IsochronePoint[] = [];
@@ -221,22 +362,31 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
       const t0frontier = performance.now();
 
       for (const point of isochrone) {
-        if (edgeIndex && isPointOnLand(edgeIndex, point.lat, point.lon)) continue;
-        if (regionIndex && avoidIds.size > 0 && isPointInRegion(regionIndex, avoidIds, point.lat, point.lon)) continue;
+        let phaseStarted = profiling ? phaseProfiler.mark() : 0;
+        const pointOnLand = edgeIndex !== null && isPointOnLand(edgeIndex, point.lat, point.lon);
+        const pointInRegion =
+          regionIndex !== null && avoidIds.size > 0 && isPointInRegion(regionIndex, avoidIds, point.lat, point.lon);
+        if (profiling) phaseProfiler.record('frontierGuard', phaseStarted);
+        if (pointOnLand || pointInRegion) continue;
 
         // Per-position bearing: cone axis points from this frontier point toward the destination,
         // not from the original start. A fixed start→end axis blocked Öresund transit headings
         // that were within 100° of the current-position bearing but >100° off the initial bearing.
+        phaseStarted = profiling ? phaseProfiler.mark() : 0;
         const pointToDestBearing = bearingTo(point.lat, point.lon, end.lat, end.lon);
+        if (profiling) phaseProfiler.record('cone', phaseStarted);
 
         const t0wind = performance.now();
+        phaseStarted = profiling ? phaseProfiler.mark() : 0;
         const windVec = wind.getWind(point.lat, point.lon, step);
         const gribFilePath = wind.getFilePathForPoint(point.lat, point.lon, step);
         windLookupMs += performance.now() - t0wind;
+        if (profiling) phaseProfiler.record('wind', phaseStarted);
 
         const tws = windSpeedKnots(windVec.u, windVec.v);
         const wdir = windDirection(windVec.u, windVec.v);
 
+        phaseStarted = profiling ? phaseProfiler.mark() : 0;
         const restBudget = advanceUnderwayBudget({
           start: point.time,
           end: nextTime,
@@ -277,7 +427,9 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
           maxHoursPerDay,
           underway: true,
         });
-        if (!underwayBudget.allowed || (daylightOnly && solarElevationDeg(point.time, point.lat, point.lon) <= 0)) {
+        const departureOutsideDaylight = daylightOnly && solarElevationDeg(point.time, point.lat, point.lon) <= 0;
+        if (profiling) phaseProfiler.record('budget', phaseStarted);
+        if (!underwayBudget.allowed || departureOutsideDaylight) {
           addWaitCandidate();
           continue;
         }
@@ -287,10 +439,12 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
           continue;
         }
         if (maxWaveM > 0) {
+          phaseStarted = profiling ? phaseProfiler.mark() : 0;
           const wh = wind.getWave(point.lat, point.lon, wind.times[step]);
+          if (profiling) phaseProfiler.record('wind', phaseStarted);
           if (wh != null && wh > maxWaveM) continue;
         }
-
+        phaseStarted = profiling ? phaseProfiler.mark() : 0;
         const distToDest = haversineNM(point.lat, point.lon, end.lat, end.lon);
         const coneCheckEnd =
           distToDest <= coneDisableLookaheadNm
@@ -305,24 +459,48 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
           segmentCrossesRegion(regionIndex, avoidIds, point.lat, point.lon, coneCheckEnd.lat, coneCheckEnd.lon);
         if (directPathBlockedByLand || directPathBlockedByRegion) coneDisabledCount++;
         const coneHalfAngle = directPathBlockedByLand || directPathBlockedByRegion ? 180 : configuredConeHalfAngle;
+        if (profiling) phaseProfiler.record('cone', phaseStarted);
 
         const candidatesBeforeHeadings = candidates.length;
         let rejectedByDaylight = false;
-        for (let rawHeading = headingOffsetDeg; rawHeading < 360 + headingOffsetDeg; rawHeading += headingStep) {
-          const hdg = ((rawHeading % 360) + 360) % 360;
+        const polarCacheKey = `${windVec.u}:${windVec.v}`;
+        let headingPerformance = polarHeadingCache.get(polarCacheKey);
+        if (!headingPerformance) {
+          headingPerformance = {
+            twa: new Float64Array(headings.length).fill(Number.NaN),
+            speed: new Float64Array(headings.length).fill(Number.NaN),
+          };
+          if (polarHeadingCache.size < MAX_POLAR_HEADING_CACHE_ENTRIES)
+            polarHeadingCache.set(polarCacheKey, headingPerformance);
+        }
+        for (let headingIndex = 0; headingIndex < headings.length; headingIndex++) {
+          phaseStarted = profiling ? phaseProfiler.mark() : 0;
+          const preparedHeading = headings[headingIndex];
+          const hdg = preparedHeading.heading;
           const deviation = Math.abs(((hdg - pointToDestBearing + 180 + 360) % 360) - 180);
-          if (deviation > coneHalfAngle) continue;
+          if (deviation > coneHalfAngle) {
+            if (profiling) phaseProfiler.record('headingAndPolar', phaseStarted);
+            continue;
+          }
 
           // Seed point (parent===undefined) has no meaningful prior heading — allow all cone-valid
           // headings unconditionally on step 1 (BUG-44).
           if (point.parent !== undefined) {
             const delta = Math.abs(((hdg - point.heading + 180 + 360) % 360) - 180);
-            if (delta > maxHeadingChangeDeg) continue;
+            if (delta > maxHeadingChangeDeg) {
+              if (profiling) phaseProfiler.record('headingAndPolar', phaseStarted);
+              continue;
+            }
           }
 
-          const twa = trueWindAngle(hdg, wdir);
-
-          const polarSpeed = interpolateBoatSpeed(polar, twa, tws);
+          let twa = headingPerformance.twa[headingIndex];
+          let polarSpeed = headingPerformance.speed[headingIndex];
+          if (Number.isNaN(polarSpeed)) {
+            twa = trueWindAngle(hdg, wdir);
+            polarSpeed = interpolateBoatSpeed(polar, twa, tws);
+            headingPerformance.twa[headingIndex] = twa;
+            headingPerformance.speed[headingIndex] = polarSpeed;
+          }
           // REQ-84: motor fires when polarSpeed < motorBelowKn threshold.
           const motoring = motorSpeedKn > 0 && (forceMotor || (motorBelowKn > 0 && polarSpeed < motorBelowKn));
           const effectiveSpeed = motoring ? motorSpeedKn : polarSpeed;
@@ -331,69 +509,98 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
             // REQ-83: stay in place for one candidate per frontier point; advancing time only.
             if (waitForWind) addWaitCandidate();
             rejectedByPolar++;
+            if (profiling) phaseProfiler.record('headingAndPolar', phaseStarted);
             continue;
           }
-
           candidatesEvaluated++;
           const distNM = effectiveSpeed * dtHours;
-          const wt = destinationPoint(point.lat, point.lon, distNM, hdg);
+          const wt = destinationPointPrepared(point.lat, point.lon, distNM, preparedHeading);
           let newLat = wt.lat;
           let newLon = wt.lon;
+          if (profiling) phaseProfiler.record('headingAndPolar', phaseStarted);
 
           // Apply ocean current drift: water-track endpoint + current displacement over dtHours.
           // Current is sampled at the frontier point (start of the step) in m/s.
           // Cosine correction uses point.lat (original latitude) — not newLat which is
           // already modified by the latitude drift (BUG-94).
+          phaseStarted = profiling ? phaseProfiler.mark() : 0;
           if (current) {
             const cur = current.getCurrent(point.lat, point.lon, nextTime);
             const dtS = dtHours * 3600;
             newLat += (cur.v * dtS) / (1852 * 60);
             newLon += (cur.u * dtS) / (1852 * 60 * Math.cos(point.lat * DEG_TO_RAD));
           }
+          if (profiling) phaseProfiler.record('current', phaseStarted);
 
-          if (!wind.coversPointAtTime(newLat, newLon, step)) {
+          phaseStarted = profiling ? phaseProfiler.mark() : 0;
+          const candidateCovered = wind.coversPointAtTime(newLat, newLon, step);
+          if (profiling) phaseProfiler.record('coverage', phaseStarted);
+          if (!candidateCovered) {
             rejectedByGrib++;
             continue;
           } // discard candidates outside spatiotemporal GRIB domain (BUG-37, BUG-75)
 
-          if (daylightOnly && !isLegInDaylight(point.time, nextTime, point, { lat: newLat, lon: newLon })) {
+          phaseStarted = profiling ? phaseProfiler.mark() : 0;
+          const corridorAnchor = preparedCorridor[step + 1];
+          const outsideCorridor =
+            corridorAnchor !== null &&
+            !directPathBlockedByLand &&
+            !directPathBlockedByRegion &&
+            haversineNM(newLat, newLon, corridorAnchor.lat, corridorAnchor.lon) > corridorWidthNm;
+          if (profiling) phaseProfiler.record('coverage', phaseStarted);
+          if (outsideCorridor) continue;
+
+          phaseStarted = profiling ? phaseProfiler.mark() : 0;
+          const candidateOutsideDaylight =
+            daylightOnly && !isLegInDaylight(point.time, nextTime, point, { lat: newLat, lon: newLon });
+          if (profiling) phaseProfiler.record('daylight', phaseStarted);
+          if (candidateOutsideDaylight) {
             rejectedByDaylight = true;
             continue;
           }
 
+          phaseStarted = profiling ? phaseProfiler.mark() : 0;
+          let candidateBlockedByLand = false;
           if (edgeIndex) {
             landChecksPerformed++;
             const t0land = performance.now();
-            const blocked = segmentCrossesLandFast(edgeIndex, point.lat, point.lon, newLat, newLon);
+            candidateBlockedByLand = segmentCrossesLandFast(edgeIndex, point.lat, point.lon, newLat, newLon);
             landCheckMs += performance.now() - t0land;
-            if (blocked) {
-              rejectedByLand++;
-              continue;
-            }
           }
-          if (
-            navigationConstraintViolation(
-              navigationSafety?.shorelineIndex ?? null,
-              navigationSafety?.depthProvider ?? null,
-              navigationConstraints,
-              point.lat,
-              point.lon,
-              newLat,
-              newLon,
-            )
-          ) {
-            rejectedBySafety++;
-            continue;
-          }
-          if (
-            regionIndex &&
-            avoidIds.size > 0 &&
-            segmentCrossesRegion(regionIndex, avoidIds, point.lat, point.lon, newLat, newLon)
-          ) {
+          if (profiling) phaseProfiler.record('land', phaseStarted);
+          if (candidateBlockedByLand) {
             rejectedByLand++;
             continue;
           }
 
+          phaseStarted = profiling ? phaseProfiler.mark() : 0;
+          const candidateSafetyViolation = navigationConstraintViolation(
+            navigationSafety?.shorelineIndex ?? null,
+            navigationSafety?.depthProvider ?? null,
+            navigationConstraints,
+            point.lat,
+            point.lon,
+            newLat,
+            newLon,
+          );
+          if (profiling) phaseProfiler.record('safety', phaseStarted);
+          if (candidateSafetyViolation) {
+            rejectedBySafety++;
+            continue;
+          }
+
+          phaseStarted = profiling ? phaseProfiler.mark() : 0;
+          const candidateBlockedByRegion =
+            regionIndex &&
+            avoidIds.size > 0 &&
+            segmentCrossesRegion(regionIndex, avoidIds, point.lat, point.lon, newLat, newLon);
+          if (profiling) phaseProfiler.record('region', phaseStarted);
+          if (candidateBlockedByRegion) {
+            rejectedByLand++;
+            continue;
+          }
+
+          phaseStarted = profiling ? phaseProfiler.mark() : 0;
           const newPoint: IsochronePoint = {
             lat: newLat,
             lon: newLon,
@@ -413,8 +620,10 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
           candidates.push(newPoint);
 
           const distToEnd = haversineNM(newLat, newLon, end.lat, end.lon);
+          if (profiling) phaseProfiler.record('candidateAndArrival', phaseStarted);
           if (distToEnd <= arrivalRadiusNm) {
             const finalArrivalTime = new Date(nextTime.getTime() + (distToEnd / effectiveSpeed) * 3_600_000);
+            phaseStarted = profiling ? phaseProfiler.mark() : 0;
             const finalBudget = advanceUnderwayBudget({
               start: nextTime,
               end: finalArrivalTime,
@@ -424,8 +633,14 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
               maxHoursPerDay,
               underway: true,
             });
+            if (profiling) phaseProfiler.record('budget', phaseStarted);
+
+            phaseStarted = profiling ? phaseProfiler.mark() : 0;
             const arrivalBlockedByLand =
               edgeIndex !== null && segmentCrossesLandFast(edgeIndex, newLat, newLon, end.lat, end.lon);
+            if (profiling) phaseProfiler.record('land', phaseStarted);
+
+            phaseStarted = profiling ? phaseProfiler.mark() : 0;
             const arrivalSafetyViolation = navigationConstraintViolation(
               navigationSafety?.shorelineIndex ?? null,
               navigationSafety?.depthProvider ?? null,
@@ -435,12 +650,15 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
               end.lat,
               end.lon,
             );
-            if (
-              finalBudget.allowed &&
-              (!daylightOnly || isLegInDaylight(nextTime, finalArrivalTime, { lat: newLat, lon: newLon }, end)) &&
-              !arrivalBlockedByLand &&
-              !arrivalSafetyViolation
-            ) {
+            if (profiling) phaseProfiler.record('safety', phaseStarted);
+
+            phaseStarted = profiling ? phaseProfiler.mark() : 0;
+            const arrivalInDaylight =
+              !daylightOnly || isLegInDaylight(nextTime, finalArrivalTime, { lat: newLat, lon: newLon }, end);
+            if (profiling) phaseProfiler.record('daylight', phaseStarted);
+
+            phaseStarted = profiling ? phaseProfiler.mark() : 0;
+            if (finalBudget.allowed && arrivalInDaylight && !arrivalBlockedByLand && !arrivalSafetyViolation) {
               if (sharedAlternativeCount > 1) arrivedCandidates.push(newPoint);
               if (
                 firstArrivalStep === null &&
@@ -448,6 +666,7 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
               )
                 arrived = newPoint;
             }
+            if (profiling) phaseProfiler.record('candidateAndArrival', phaseStarted);
           }
         }
         if (rejectedByDaylight && candidates.length === candidatesBeforeHeadings) addWaitCandidate();
@@ -457,15 +676,23 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
       const polarMs = Math.max(0, frontierLoopMs - windLookupMs - landCheckMs);
 
       const stepCalcMs = performance.now() - stepStart;
+      let phaseStarted = profiling ? phaseProfiler.mark() : 0;
       for (const c of candidates) c.stepCalcMs = Math.round(stepCalcMs);
+      if (profiling) phaseProfiler.record('candidateStamp', phaseStarted);
 
       if (arrived) {
-        if (sharedAlternativeCount === 1) break;
+        if (sharedAlternativeCount === 1) {
+          phaseProfiler.endStep(isochrone.length, candidates.length);
+          break;
+        }
         if (firstArrivalStep === null) firstArrivalStep = step;
         // Later arrivals are often the routes that pass an obstruction on a different side.
         // Keep expanding briefly after the fastest arrival instead of returning variants that
         // differ only in their final approach to the same path.
-        if (step - firstArrivalStep >= 6) break;
+        if (step - firstArrivalStep >= 6) {
+          phaseProfiler.endStep(isochrone.length, candidates.length);
+          break;
+        }
       }
 
       lastRejectedByLand = rejectedByLand;
@@ -474,8 +701,10 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
       lastRejectedBySafety = rejectedBySafety;
 
       const t0prune = performance.now();
+      phaseStarted = profiling ? phaseProfiler.mark() : 0;
       isochrone = pruneToFrontier(candidates, start.lat, start.lon, sectorSize);
       const pruningMs = performance.now() - t0prune;
+      if (profiling) phaseProfiler.record('prune', phaseStarted);
 
       if (isochrone.length > 0) lastFrontier = isochrone;
 
@@ -502,11 +731,16 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
         if (lastFrontier !== null) {
           const closest = closestTo(lastFrontier, end);
           const dist = Math.round(haversineNM(closest.lat, closest.lon, end.lat, end.lon));
-          return {
+          const result = {
             route: backtrack(closest, wind, false),
             warning: `No reachable positions at step ${stepsCompleted + 1} (${reasonText(reason)}) ${counts} — partial route shown (${dist} nm from destination)`,
           };
+          phaseProfiler.endStep(0, candidates.length);
+          phaseProfiler.finish('partial');
+          return result;
         }
+        phaseProfiler.endStep(0, candidates.length);
+        phaseProfiler.finish('failed');
         throw new RoutingError(
           `No reachable positions at step ${step - startTimeIdx + 1} — ${reasonText(reason)}${reason === 'wind' ? ' to make progress' : ''} ${counts}`,
           reason,
@@ -528,9 +762,12 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
       stepTimings.push(timing);
       logStepTiming(timing);
 
+      phaseStarted = profiling ? phaseProfiler.mark() : 0;
       const frontier: Array<[number, number]> = isochrone.map((p) => [p.lat, p.lon]);
       stepsCompleted++;
       onProgress(Math.round(((step - startTimeIdx + 1) / nSteps) * 100), frontier);
+      if (profiling) phaseProfiler.record('progress', phaseStarted);
+      phaseProfiler.endStep(isochrone.length, candidates.length);
       // Let Signal K flush progress and accept a cancellation request between forecast steps.
       await new Promise<void>((resolve) => setImmediate(resolve));
     }
@@ -542,11 +779,14 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
         // Time steps exhausted with a live frontier — route extends past forecast coverage.
         const closest = closestTo(isochrone, end);
         const dist = Math.round(haversineNM(closest.lat, closest.lon, end.lat, end.lon));
-        return {
+        const result = {
           route: backtrack(closest, wind, false),
           warning: `Route extends past forecast coverage after ${stepsCompleted} steps — partial route shown (${dist} nm from destination)`,
         };
+        phaseProfiler.finish('partial');
+        return result;
       }
+      phaseProfiler.finish('failed');
       throw new RoutingError(
         `Destination not reached within forecast period after ${stepsCompleted} steps`,
         'grib_exhausted',
@@ -554,11 +794,16 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
     }
 
     const route = backtrack(arrived, wind, true, end);
-    if (sharedAlternativeCount === 1) return { route };
-    return {
+    if (sharedAlternativeCount === 1) {
+      phaseProfiler.finish('complete');
+      return { route };
+    }
+    const result = {
       route,
       alternatives: collectDistinctArrivalRoutes(route, arrivedCandidates, sharedAlternativeCount, wind, end),
     };
+    phaseProfiler.finish('complete');
+    return result;
   }
 }
 

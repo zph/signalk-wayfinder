@@ -863,7 +863,10 @@ module.exports = (app: SignalKApp) => {
                 const fullRoute: RoutePoint[] = [];
                 let sharedRoutes: RoutePoint[][] | undefined;
                 const warnings: string[] = [];
-                let continuationOptions = task.options;
+                let continuationOptions: Record<string, unknown> = {
+                  ...task.options,
+                  _profileAttempt: task.attempt,
+                };
                 for (let leg = 0; leg < points.length - 1; leg++) {
                   const result = await algorithm.calculate(
                     wind,
@@ -900,6 +903,7 @@ module.exports = (app: SignalKApp) => {
                     throw new Error('A route leg exceeded the configured daily underway limit');
                   continuationOptions = {
                     ...task.options,
+                    _profileAttempt: task.attempt,
                     passageDepartureTime: passageDeparture.toISOString(),
                     initialPassageDayIndex: passageBudget.passageDayIndex,
                     initialUnderwayHoursToday: passageBudget.hoursToday,

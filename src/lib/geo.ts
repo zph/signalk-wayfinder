@@ -43,6 +43,38 @@ export function destinationPoint(
   };
 }
 
+export interface PreparedHeading {
+  heading: number;
+  sin: number;
+  cos: number;
+}
+
+export function prepareHeading(heading: number): PreparedHeading {
+  const radians = heading * DEG_TO_RAD;
+  return { heading, sin: Math.sin(radians), cos: Math.cos(radians) };
+}
+
+export function destinationPointPrepared(
+  lat: number,
+  lon: number,
+  distNM: number,
+  heading: PreparedHeading,
+): { lat: number; lon: number } {
+  const d = distNM / R_NM;
+  const lat1 = lat * DEG_TO_RAD;
+  const lon1 = lon * DEG_TO_RAD;
+  const sinLat1 = Math.sin(lat1);
+  const cosLat1 = Math.cos(lat1);
+  const sinDistance = Math.sin(d);
+  const cosDistance = Math.cos(d);
+  const lat2 = Math.asin(sinLat1 * cosDistance + cosLat1 * sinDistance * heading.cos);
+  const lon2 = lon1 + Math.atan2(heading.sin * sinDistance * cosLat1, cosDistance - sinLat1 * Math.sin(lat2));
+  return {
+    lat: lat2 * RAD_TO_DEG,
+    lon: ((lon2 * RAD_TO_DEG + 540) % 360) - 180,
+  };
+}
+
 export function windSpeedKnots(u: number, v: number): number {
   return Math.sqrt(u * u + v * v) * 1.94384; // m/s → knots
 }

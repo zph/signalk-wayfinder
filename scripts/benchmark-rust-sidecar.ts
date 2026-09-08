@@ -75,6 +75,11 @@ function assertClearRoute(route: RoutePoint[], land: ReturnType<typeof buildLand
   }
 }
 
+function assertCompletedRoute(route: RoutePoint[]): void {
+  assert.deepEqual(route[0] && { lat: route[0].lat, lon: route[0].lon }, request.start);
+  assert.deepEqual(route.at(-1) && { lat: route.at(-1)!.lat, lon: route.at(-1)!.lon }, request.end);
+}
+
 function averageRouteSeparationNm(a: RoutePoint[], b: RoutePoint[]): number {
   const samples = Math.min(12, Math.max(2, Math.min(a.length, b.length)));
   let total = 0;
@@ -192,6 +197,7 @@ async function calculateNodeShared(count: number): Promise<RoutePoint[][]> {
   const result = await new IsochroneAlgorithm().calculate(windProvider, null, polar, land, null, request, () => {}, {
     ...options,
     sharedAlternativeCount: count,
+    coarseToFine: true,
   });
   return result.alternatives ?? [result.route];
 }
@@ -300,7 +306,14 @@ async function main(): Promise<void> {
         rustBatchRoutes = await calculateRustBatch(client, count);
         rustBatchSamples.push(performance.now() - started);
       }
-      for (const route of [...nodeBatchRoutes, ...nodeSharedRoutes, ...rustBatchRoutes]) assertClearRoute(route, land);
+      for (const route of [...nodeBatchRoutes, ...nodeSharedRoutes, ...rustBatchRoutes]) {
+        assertCompletedRoute(route);
+        assertClearRoute(route, land);
+      }
+      const sharedArrivalDeltaMs = Math.abs(
+        nodeSharedRoutes[0].at(-1)!.time.getTime() - nodeRoute.at(-1)!.time.getTime(),
+      );
+      assert.ok(sharedArrivalDeltaMs <= 3_600_000, `shared arrival time differs by ${sharedArrivalDeltaMs} ms`);
       const nodeBatch = metrics(nodeBatchSamples);
       const nodeShared = metrics(nodeSharedSamples);
       const rustBatch = metrics(rustBatchSamples);
@@ -308,7 +321,7 @@ async function main(): Promise<void> {
         alternatives: count,
         nodeWorkers: resolveAlternativeWorkerCount(count, configuredNodeWorkers),
         node: nodeBatch,
-        nodeSharedSearch: nodeShared,
+        nodeCoarseToFineSharedSearch: nodeShared,
         sharedRoutesReturned: nodeSharedRoutes.length,
         minimumSharedRouteSeparationNm: minimumPairwiseSeparationNm(nodeSharedRoutes),
         sharedRouteSeparationFromPrimaryNm: nodeSharedRoutes

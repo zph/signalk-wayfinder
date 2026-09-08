@@ -89,6 +89,10 @@ test('plans one shared search for direct alternatives and preserves repeated fal
   assert.equal(shared.shared, true);
   assert.equal(shared.tasks.length, 1);
   assert.equal(shared.tasks[0].options.sharedAlternativeCount, 10);
+  assert.equal(shared.tasks[0].options.coarseToFine, true);
+
+  const exact = planAlternativeSearch({ headingStep: 5, coarseToFine: false }, 'fastest', 10, true);
+  assert.equal(exact.tasks[0].options.coarseToFine, false);
 
   const repeated = planAlternativeSearch({ headingStep: 5 }, 'fastest', 5, false);
   assert.equal(repeated.shared, false);

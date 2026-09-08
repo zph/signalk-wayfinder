@@ -292,6 +292,59 @@ test('calculate: one search returns distinct arrival paths for route alternative
   );
 });
 
+test('calculate: coarse-to-fine shared search preserves the primary route and alternatives', async () => {
+  const times = hourlyTimes('2024-01-01T00:00:00Z', 8);
+  const request: CalculationRequest = {
+    start: { lat: 41, lon: 11 },
+    end: { lat: 41.2, lon: 11 },
+    departureTime: times[0].toISOString(),
+  };
+  const wind = makeWind(makeGrib(times));
+  const baseline = await algo.calculate(wind, null, makePolar(), null, null, request, () => {}, {
+    arrivalRadiusNm: 1,
+    sharedAlternativeCount: 5,
+  });
+  const progress: number[] = [];
+  const optimized = await algo.calculate(
+    wind,
+    null,
+    makePolar(),
+    null,
+    null,
+    request,
+    (percent) => progress.push(percent),
+    {
+      arrivalRadiusNm: 1,
+      sharedAlternativeCount: 5,
+      coarseToFine: true,
+    },
+  );
+
+  assert.equal(optimized.route.at(-1)?.lat, request.end.lat);
+  assert.equal(optimized.route.at(-1)?.lon, request.end.lon);
+  assert.equal(optimized.route.at(-1)?.time.getTime(), baseline.route.at(-1)?.time.getTime());
+  assert.ok(optimized.alternatives && optimized.alternatives.length > 1);
+  assert.ok(progress.every((value, index) => index === 0 || value >= progress[index - 1]));
+});
+
+test('calculate: coarse-to-fine falls back when the coarse heading lattice misses the route', async () => {
+  const times = hourlyTimes('2024-01-01T00:00:00Z', 8);
+  const request: CalculationRequest = {
+    start: { lat: 41, lon: 11 },
+    end: { lat: 41, lon: 11.2 },
+    departureTime: times[0].toISOString(),
+  };
+  const result = await algo.calculate(makeWind(makeGrib(times)), null, makePolar(), null, null, request, () => {}, {
+    arrivalRadiusNm: 1,
+    sharedAlternativeCount: 3,
+    coarseToFine: true,
+    coarseHeadingStep: 360,
+    coarseSectorSize: 360,
+  });
+  assert.equal(result.route.at(-1)?.lat, request.end.lat);
+  assert.equal(result.route.at(-1)?.lon, request.end.lon);
+});
+
 test('calculate: every RoutePoint has a non-negative legCalcMs; start point is 0', async () => {
   const wind = makeWind(makeGrib());
   const polar = makePolar();

@@ -1,6 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { haversineNM, bearingTo, destinationPoint, windSpeedKnots, windDirection, trueWindAngle } from '../geo';
+import {
+  haversineNM,
+  bearingTo,
+  destinationPoint,
+  destinationPointPrepared,
+  prepareHeading,
+  windSpeedKnots,
+  windDirection,
+  trueWindAngle,
+} from '../geo';
 
 const EPSILON = 0.01; // 0.01 nm / 0.01 deg tolerance
 
@@ -48,6 +57,13 @@ test('destinationPoint: round-trip — arrive back at start', () => {
   const { lat, lon } = destinationPoint(48, 2, 100, 45);
   const dist = haversineNM(48, 2, lat, lon);
   assert.ok(Math.abs(dist - 100) < 0.01, `round-trip distance off: ${dist}`);
+});
+
+test('destinationPointPrepared: matches direct heading calculation', () => {
+  const direct = destinationPoint(48, 2, 100, 47.5);
+  const prepared = destinationPointPrepared(48, 2, 100, prepareHeading(47.5));
+  assert.ok(Math.abs(direct.lat - prepared.lat) < 1e-12);
+  assert.ok(Math.abs(direct.lon - prepared.lon) < 1e-12);
 });
 
 test('windSpeedKnots: unit vector → 1.94384 kt', () => {

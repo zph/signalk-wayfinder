@@ -11,6 +11,7 @@ export class SingleFileCurrentProvider implements CurrentProvider {
   readonly times: Date[];
   readonly meta: GribFileMeta;
   private readonly entry: CurrentFileEntry;
+  private readonly timeIndexes = new Map<number, number>();
 
   constructor(entry: CurrentFileEntry) {
     if (!entry.data) throw new Error('CurrentFileEntry has no loaded data');
@@ -21,7 +22,12 @@ export class SingleFileCurrentProvider implements CurrentProvider {
 
   getCurrent(lat: number, lon: number, t: Date): WindVector {
     if (!coversPoint(this.meta, lat, lon)) return { u: 0, v: 0 };
-    const timeIdx = nearestCurrentTimeIndex(this.entry.data!, t);
+    const timeMs = t.getTime();
+    let timeIdx = this.timeIndexes.get(timeMs);
+    if (timeIdx === undefined) {
+      timeIdx = nearestCurrentTimeIndex(this.entry.data!, t);
+      this.timeIndexes.set(timeMs, timeIdx);
+    }
     return getCurrentAt(this.entry.data!, lat, lon, timeIdx);
   }
 

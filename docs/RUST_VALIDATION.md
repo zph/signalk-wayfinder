@@ -97,3 +97,11 @@ The first algorithmic change is now implemented in Node; see
 [SHARED_ALTERNATIVE_SEARCH.md](SHARED_ALTERNATIVE_SEARCH.md). Node is retained as the production
 engine while this design is validated because the optimization comes from shared work rather than
 from the language port.
+
+The benchmark now also reports `nodeCoarseToFineSharedSearch`, the number of geometrically distinct
+routes it actually returned, and their pairwise separation. In three-sample warm runs, the standard
+profile improved from 3.54 seconds to 0.58 seconds p50 (6.1×) and returned five distinct routes. The
+long profile improved from 7.48 seconds to 0.35 seconds p50 (21.6×), but its uniform conditions
+contain only two distinct route families. The Rust sidecar's repeated batches took 1.35 seconds and
+3.37 seconds respectively, so shared work in Node is already faster than repeating the search in
+Rust. The route-count limitation must remain visible beside any timing claim.

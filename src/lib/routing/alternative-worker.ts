@@ -82,7 +82,7 @@ async function main(): Promise<void> {
       let sharedRoutes: RoutePoint[][] | undefined;
       const warnings: string[] = [];
       const legCount = initialization.points.length - 1;
-      let continuationOptions = task.options;
+      let continuationOptions: Record<string, unknown> = { ...task.options, _profileAttempt: task.attempt };
       for (let leg = 0; leg < legCount; leg++) {
         const result = await algorithm.calculate(
           context.wind,
@@ -118,6 +118,7 @@ async function main(): Promise<void> {
         if (!passageBudget.allowed) throw new Error('A route leg exceeded the configured daily underway limit');
         continuationOptions = {
           ...task.options,
+          _profileAttempt: task.attempt,
           passageDepartureTime: passageDeparture.toISOString(),
           initialPassageDayIndex: passageBudget.passageDayIndex,
           initialUnderwayHoursToday: passageBudget.hoursToday,

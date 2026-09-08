@@ -23,7 +23,12 @@ export function planAlternativeSearch(
       attempt,
       options: {
         ...optionsForAlternative(base, objective, attempt, requestedCount),
-        ...(shared ? { sharedAlternativeCount: requestedCount } : {}),
+        ...(shared
+          ? {
+              sharedAlternativeCount: requestedCount,
+              coarseToFine: base.coarseToFine !== false,
+            }
+          : {}),
       },
     })),
   };
