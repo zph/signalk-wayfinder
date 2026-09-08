@@ -3,6 +3,7 @@
 import * as nodepath from 'node:path';
 import * as fs from 'node:fs/promises';
 import { createWriteStream } from 'node:fs';
+import type { Worker } from 'node:worker_threads';
 import express, { Request, Response } from 'express';
 
 // Side-effect: copies gdal-async .node binary from optional dep — must run before ./lib/grib
@@ -19,7 +20,6 @@ import {
   RegionIndex,
   CalculationStatus,
   PluginSettings,
-  RoutePoint,
   RouteQualityReport,
   LatLon,
   DepthProvider,
@@ -67,6 +67,8 @@ import {
   type RouteAlternative,
 } from './lib/route-alternatives';
 import { resolveVesselDraft, STANDARD_DRAFT_PATHS } from './lib/vessel-draft';
+import { resolveAlternativeWorkerCount, runAlternativeAttempts } from './lib/routing/alternative-worker-runner';
+import type { AlternativeWorkerInitialization } from './lib/routing/alternative-worker-protocol';
 
 const ALGORITHMS: Map<string, RoutingAlgorithm> = new Map([['isochrone', new IsochroneAlgorithm()]]);
 
@@ -93,6 +95,7 @@ module.exports = (app: SignalKApp) => {
   let pendingAlternatives: Array<RouteAlternative & { summary: RouteAlternativeSummary }> = [];
   let pendingVesselDraft: { valueM: number; path: string } | null = null;
   let calculationSequence = 0;
+  const calculationWorkers = new Set<Worker>();
   const sseClients = new Set<Response>();
 
   function pushSse(data: object): void {
@@ -302,6 +305,8 @@ module.exports = (app: SignalKApp) => {
     },
 
     stop: () => {
+      for (const worker of calculationWorkers) void worker.terminate();
+      calculationWorkers.clear();
       gribFiles = [];
       currentFiles = [];
       currentProvider = null;
@@ -422,6 +427,15 @@ module.exports = (app: SignalKApp) => {
           default: 5,
           minimum: 1,
           maximum: 10,
+        },
+        alternativeWorkerCount: {
+          type: 'integer',
+          title: 'Parallel route workers',
+          description:
+            'Maximum CPU workers used for route-alternative attempts. More workers are faster but use more memory.',
+          default: 4,
+          minimum: 1,
+          maximum: 8,
         },
         motorSpeedKn: {
           type: 'number',
@@ -753,8 +767,6 @@ module.exports = (app: SignalKApp) => {
             throw new Error('All relevant GRIB files failed to load — check file integrity');
           }
 
-          const wind = new MultiFileWindProvider(loadedEntries);
-
           const activeCurrentProvider = req.body.useCurrentGrib === false ? null : currentProvider;
           const objective = (mergedOptions.objective ?? 'fastest') as RoutingObjective;
           if (!ROUTING_OBJECTIVES.includes(objective)) throw new Error(`Unsupported routing objective: ${objective}`);
@@ -765,63 +777,61 @@ module.exports = (app: SignalKApp) => {
           const attemptCount = requestedCount === 1 ? 1 : Math.min(20, requestedCount * 2);
           const candidates: RouteAlternative[] = [];
           let lastCandidateError: Error | undefined;
-
-          const calculateOne = async (
-            runOptions: Record<string, unknown>,
-            attempt: number,
-          ): Promise<{ route: RoutePoint[]; warning?: string }> => {
-            const reportProgress = (fraction: number, frontier: Array<[number, number]>): void => {
-              if (sequence !== calculationSequence) throw new Error('Calculation cancelled');
-              const progress = ((attempt + fraction) / attemptCount) * 100;
+          const points: Array<LatLon> = [start, ...waypoints, end];
+          const needsShorelineIndex =
+            navigationConstraints.minimumShoreDistanceNm > 0 || navigationConstraints.maximumOffshoreDistanceNm > 0;
+          const workerInitialization: AlternativeWorkerInitialization = {
+            gribEntries: loadedEntries.map((entry) => ({ meta: entry.meta, path: entry.meta.path })),
+            ...(activeCurrentProvider
+              ? { currentEntry: { meta: activeCurrentProvider.meta, path: activeCurrentProvider.meta.path } }
+              : {}),
+            polar: routePolar,
+            dataDir: pluginDataDir(app),
+            hiresLand: hiresActive,
+            routeLandMode: !useLandAvoidance ? 'none' : useSafetyMargin ? 'dilated' : 'base',
+            needsShorelineIndex,
+            regions: regionIndex ? Array.from(regionIndex.regions.entries()) : [],
+            request: { ...req.body, start, end, departureTime, waypoints },
+            points,
+            ...(depthProvider && settings?.bathymetryPath
+              ? {
+                  bathymetry: {
+                    path: settings.bathymetryPath,
+                    band: settings.bathymetryBand ?? 1,
+                    valueConvention: settings.bathymetryValueConvention ?? 'elevation',
+                  },
+                }
+              : {}),
+          };
+          const workerCount = resolveAlternativeWorkerCount(attemptCount, settings?.alternativeWorkerCount);
+          app.debug(`Calculating ${attemptCount} route attempt(s) with ${workerCount} worker(s)`);
+          const tasks = Array.from({ length: attemptCount }, (_, attempt) => ({
+            attempt,
+            options: optionsForAlternative(mergedOptions, objective, attempt, requestedCount),
+          }));
+          const outcomes = await runAlternativeAttempts({
+            initialization: workerInitialization,
+            tasks,
+            workerCount,
+            activeWorkers: calculationWorkers,
+            onProgress: (progress, frontier) => {
+              if (sequence !== calculationSequence) return;
               calcStatus = { status: 'calculating', progress, frontier };
               pushSse({ type: 'progress', progress, frontier });
-            };
-            if (waypoints.length === 0) {
-              return algorithm.calculate(
-                wind,
-                activeCurrentProvider,
-                routePolar,
-                activeIndex,
-                regionIndex,
-                req.body,
-                (pct, frontier) => reportProgress(pct / 100, frontier),
-                runOptions,
-                { shorelineIndex: edgeIndex, depthProvider },
-              );
-            }
-            const points: Array<LatLon> = [start, ...waypoints, end];
-            const fullRoute: RoutePoint[] = [];
-            const warnings: string[] = [];
-            for (let i = 0; i < points.length - 1; i++) {
-              const segResult = await algorithm.calculate(
-                wind,
-                activeCurrentProvider,
-                routePolar,
-                activeIndex,
-                regionIndex,
-                {
-                  ...req.body,
-                  start: points[i],
-                  end: points[i + 1],
-                  departureTime: i === 0 ? departureTime : fullRoute.at(-1)!.time.toISOString(),
-                },
-                (pct, frontier) => reportProgress((i + pct / 100) / (points.length - 1), frontier),
-                runOptions,
-                { shorelineIndex: edgeIndex, depthProvider },
-              );
-              if (segResult.warning) warnings.push(`Leg ${i + 1}: ${segResult.warning}`);
-              fullRoute.push(...(i === 0 ? segResult.route : segResult.route.slice(1)));
-            }
-            return { route: fullRoute, warning: warnings.length > 0 ? warnings.join('; ') : undefined };
-          };
+            },
+          });
 
-          for (let attempt = 0; attempt < attemptCount; attempt++) {
+          if (sequence !== calculationSequence) return;
+          for (const outcome of outcomes) {
+            if (outcome.error || !outcome.route) {
+              lastCandidateError = outcome.error ?? new Error(`Route attempt ${outcome.attempt + 1} returned no route`);
+              continue;
+            }
+            const runOptions = tasks[outcome.attempt].options;
             try {
-              const runOptions = optionsForAlternative(mergedOptions, objective, attempt, requestedCount);
-              const result = await calculateOne(runOptions, attempt);
-              const quality = assessRouteQuality(result.route, {
+              const quality = assessRouteQuality(outcome.route, {
                 start,
-                ...(result.warning ? {} : { end }),
+                ...(outcome.warning ? {} : { end }),
                 polar: routePolar,
                 landIndex: activeIndex,
                 shorelineIndex: edgeIndex,
@@ -838,7 +848,12 @@ module.exports = (app: SignalKApp) => {
                 navigationConstraints,
               });
               if (quality.valid) {
-                candidates.push({ route: result.route, warning: result.warning, quality, complete: !result.warning });
+                candidates.push({
+                  route: outcome.route,
+                  warning: outcome.warning,
+                  quality,
+                  complete: !outcome.warning,
+                });
               } else {
                 lastCandidateError = new Error(
                   `Route quality checks failed: ${quality.issues
@@ -848,7 +863,6 @@ module.exports = (app: SignalKApp) => {
                 );
               }
             } catch (error) {
-              if (sequence !== calculationSequence) return;
               lastCandidateError = error instanceof Error ? error : new Error(String(error));
             }
           }
@@ -926,6 +940,8 @@ module.exports = (app: SignalKApp) => {
       binnacleRoute(router, 'cancel').post('/cancel', (_req: Request, res: Response) => {
         const wasCalculating = calcStatus.status === 'calculating';
         calculationSequence += 1;
+        for (const worker of calculationWorkers) void worker.terminate();
+        calculationWorkers.clear();
         pendingRoute = null;
         pendingRouteQuality = null;
         pendingAlternatives = [];

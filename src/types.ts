@@ -260,6 +260,7 @@ export interface PluginSettings {
   vesselDraftPath?: string;
   alternativeCount?: number;
   motorSpeedKn?: number;
+  alternativeWorkerCount?: number;
   avoidRegionIds?: string[];
 }
 
