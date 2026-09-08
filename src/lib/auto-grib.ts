@@ -60,12 +60,36 @@ function queryUrl(kind: 'wind' | 'wave', cycle: Date, hour: number, bounds: [num
 }
 
 async function fetchGrib(url: URL, fetcher: typeof fetch): Promise<Buffer> {
-  const response = await fetcher(url, { signal: AbortSignal.timeout(90_000) });
-  if (!response.ok) throw new Error(`NOAA forecast request failed: HTTP ${response.status}`);
-  const data = Buffer.from(await response.arrayBuffer());
-  if (data.length < 16 || data.subarray(0, 4).toString('ascii') !== 'GRIB')
-    throw new Error('NOAA forecast response was not a GRIB2 file');
-  return data;
+  let currentUrl = url;
+  let lastStatus = 0;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const response = await fetcher(currentUrl, {
+      signal: AbortSignal.timeout(90_000),
+      redirect: 'follow',
+      headers: { 'user-agent': 'signalk-wayfinder/1.0 (route forecast acquisition)' },
+    });
+    lastStatus = response.status;
+
+    // Some fetch implementations embedded by Signal K return redirects even when
+    // redirect=follow is requested. Follow those explicitly and keep the bounded
+    // retry loop for transient NOMADS load-shedding responses.
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.get('location');
+      if (location) {
+        currentUrl = new URL(location, currentUrl);
+        continue;
+      }
+    }
+    if (response.ok) {
+      const data = Buffer.from(await response.arrayBuffer());
+      if (data.length < 16 || data.subarray(0, 4).toString('ascii') !== 'GRIB')
+        throw new Error('NOAA forecast response was not a GRIB2 file');
+      return data;
+    }
+    if (response.status !== 429 && response.status < 500 && response.status !== 302) break;
+    await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt));
+  }
+  throw new Error(`NOAA forecast request failed after retries: HTTP ${lastStatus}`);
 }
 
 async function mapConcurrent<T, R>(values: T[], limit: number, fn: (value: T) => Promise<R>): Promise<R[]> {
