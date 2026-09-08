@@ -47,7 +47,8 @@
     "screenshot2.jpg"
   ],
   "peerDependencies": {
-    "@signalk/server-api": ">=2.0.0"
+    "@signalk/server-api": ">=2.28.0",
+    "signalk-polar-performance-plugin": ">=1.4.0"
   },
   "optionalDependencies": {
     "@kristianwiklund/wr-gdal-linux-arm64": "3.12.3",

@@ -23,5 +23,5 @@ export interface SignalKApp {
   savePluginConfig?(): Promise<void> | void;
   savePluginOptions?(configuration: object, callback?: (err?: Error) => void): void;
   resourcesApi?: SignalKResourcesApi;
-  config?: { configPath?: string };
+  config?: { configPath?: string; port?: number; settings?: { port?: number } };
 }

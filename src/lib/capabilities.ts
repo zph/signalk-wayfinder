@@ -20,7 +20,7 @@ export function wayfinderCapabilities(inputs: {
   configuredDraftPath: string;
 }): WayfinderCapabilities {
   const missing: string[] = [];
-  if (!inputs.hasPolar) missing.push('a polar');
+  if (!inputs.hasPolar) missing.push('an active Polar Performance polar');
   if (!inputs.hasForecast) missing.push('forecast coverage');
   if (!inputs.hasShoreline) missing.push('the shoreline index');
   return {

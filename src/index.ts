@@ -39,7 +39,6 @@ import {
 import { MultiFileWindProvider } from './lib/windprovider';
 import { proposeCombination, combinationFileFromMeta } from './lib/gribCombination';
 import { SingleFileCurrentProvider } from './lib/currentprovider';
-import { parsePolar } from './lib/polar';
 import { buildLandIndex, polygonsInBbox, isPointOnLand } from './lib/landmask';
 import { saveRoute } from './lib/resources';
 import { buildRegionIndex, validRegionUuids } from './lib/regions';
@@ -79,6 +78,11 @@ import type { AlternativeWorkerInitialization } from './lib/routing/alternative-
 import { shareCurrentGribData, shareGribData } from './lib/shared-grib';
 import { ensureAutoGrib } from './lib/auto-grib';
 import { resolveChartGeometry } from './lib/chart-geometry';
+import {
+  loadActivePolarPerformance,
+  loadLocalActivePolarPerformance,
+  polarPerformanceBaseUrl,
+} from './lib/polar-performance-client';
 
 const ALGORITHMS: Map<string, RoutingAlgorithm> = new Map([['isochrone', new IsochroneAlgorithm()]]);
 
@@ -90,6 +94,9 @@ module.exports = (app: SignalKApp) => {
   let currentProvider: CurrentProvider | null = null;
   let gribFailedFiles: Array<{ path: string; error: string }> = [];
   let polar: PolarData | null = null;
+  let polarSourceLabel: string | null = null;
+  let polarLoadError: string | null = null;
+  let polarLastCheckedAt = 0;
   let landIndex: LandIndex | null = null; // polygon index — overlay only
   let edgeIndex: LandEdgeIndex | null = null; // edge-tile index — routing land checks
   let dilatedLandIndex: LandIndex | null = null; // dilated polygon index — overlay (REQ-42)
@@ -107,6 +114,30 @@ module.exports = (app: SignalKApp) => {
   let calculationSequence = 0;
   const calculationWorkers = new Set<Worker>();
   const sseClients = new Set<Response>();
+  const POLAR_REFRESH_TTL_MS = 5_000;
+
+  async function refreshPolar(force = false): Promise<void> {
+    if (!force && Date.now() - polarLastCheckedAt < POLAR_REFRESH_TTL_MS) {
+      if (polar) return;
+      throw new Error(polarLoadError ?? 'Polar Performance has no active polar');
+    }
+    polarLastCheckedAt = Date.now();
+    try {
+      const loaded = settings?.polarPerformanceUrl?.trim()
+        ? await loadActivePolarPerformance(polarPerformanceBaseUrl(app, settings.polarPerformanceUrl))
+        : app.config?.configPath
+          ? await loadLocalActivePolarPerformance(app.config.configPath)
+          : await loadActivePolarPerformance(polarPerformanceBaseUrl(app));
+      polar = loaded.polar;
+      polarSourceLabel = `${loaded.name} (${loaded.id})`;
+      polarLoadError = null;
+    } catch (error) {
+      polar = null;
+      polarSourceLabel = null;
+      polarLoadError = error instanceof Error ? error.message : String(error);
+      throw new Error(`Polar Performance unavailable: ${polarLoadError}`);
+    }
+  }
 
   function pushSse(data: object): void {
     const payload = `data: ${JSON.stringify(data)}\n\n`;
@@ -128,7 +159,8 @@ module.exports = (app: SignalKApp) => {
     const parts: string[] = [];
     if (gribFiles.length > 0) parts.push(`${gribFiles.length} wind GRIB file(s)`);
     if (currentFiles.length > 0) parts.push(`${currentFiles.length} current GRIB file(s)`);
-    if (polar) parts.push('polar loaded');
+    if (polar) parts.push(`Polar Performance: ${polarSourceLabel ?? 'active polar loaded'}`);
+    else parts.push('Polar Performance unavailable');
     if (edgeIndex) parts.push(`land index: ${edgeIndex.edgeGrid.size} cells`);
     if (depthProvider) parts.push(`bathymetry: ${nodepath.basename(depthProvider.source)}`);
     if (gribFailedFiles.length > 0) parts.push(`${gribFailedFiles.length} file(s) failed to index`);
@@ -259,12 +291,10 @@ module.exports = (app: SignalKApp) => {
       settings = cfg;
       app.setPluginStatus('Starting...');
 
-      if (cfg.polarPath) {
-        try {
-          polar = parsePolar(cfg.polarPath);
-        } catch (e: any) {
-          app.setPluginError(`Failed to load polar file: ${e.message}`);
-        }
+      try {
+        await refreshPolar(true);
+      } catch (error) {
+        app.setPluginError(error instanceof Error ? error.message : String(error));
       }
 
       try {
@@ -322,6 +352,9 @@ module.exports = (app: SignalKApp) => {
       currentProvider = null;
       gribFailedFiles = [];
       polar = null;
+      polarSourceLabel = null;
+      polarLoadError = null;
+      polarLastCheckedAt = 0;
       landIndex = null;
       edgeIndex = null;
       dilatedLandIndex = null;
@@ -339,7 +372,6 @@ module.exports = (app: SignalKApp) => {
 
     schema: () => ({
       type: 'object',
-      required: ['polarPath'],
       properties: {
         gribDir: {
           type: 'string',
@@ -353,10 +385,11 @@ module.exports = (app: SignalKApp) => {
             'Before each current or future route calculation, download and cache NOAA GFS wind and wave GRIB data for the requested route, departure, and estimated passage duration.',
           default: true,
         },
-        polarPath: {
+        polarPerformanceUrl: {
           type: 'string',
-          title: 'Path to polar CSV file',
-          description: 'Polar diagram in ORC/OpenCPN semicolon-delimited format (twa/tws;6;8;10...)',
+          title: 'Polar Performance API URL (optional)',
+          description:
+            'Use a Polar Performance REST API instead of the shared local Signal K data directory. Leave empty when both plugins run in the same server.',
         },
         algorithm: {
           type: 'string',
@@ -553,7 +586,12 @@ module.exports = (app: SignalKApp) => {
 
       // The Binnacle client needs a small, stable readiness contract before it can offer a plan.
       // A missing safety input is deliberately not treated as a degraded route-calculation mode.
-      binnacleRoute(router, 'capabilities').get('/api/v1/capabilities', (req: Request, res: Response) => {
+      binnacleRoute(router, 'capabilities').get('/api/v1/capabilities', async (req: Request, res: Response) => {
+        try {
+          await refreshPolar(false);
+        } catch (error) {
+          app.debug(error instanceof Error ? error.message : String(error));
+        }
         const requestedDraftPath = typeof req.query.draftPath === 'string' ? req.query.draftPath.trim() : '';
         const savedDraftPath = settings?.vesselDraftPath?.trim() || '';
         const configuredDraftPath = requestedDraftPath || savedDraftPath || STANDARD_DRAFT_PATHS[0];
@@ -573,7 +611,12 @@ module.exports = (app: SignalKApp) => {
       });
 
       binnacleRoute(router, 'calculate').post('/calculate', async (req: Request, res: Response) => {
-        if (!polar) return void res.status(503).json({ error: 'Polar data not loaded' });
+        try {
+          await refreshPolar(true);
+        } catch (error) {
+          return void res.status(503).json({ error: error instanceof Error ? error.message : String(error) });
+        }
+        if (!polar) return void res.status(503).json({ error: 'Polar Performance has no active polar' });
         const routePolar = polar;
         if (calcStatus.status === 'calculating') {
           return void res.status(409).json({ error: 'Calculation already in progress' });

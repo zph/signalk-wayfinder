@@ -238,7 +238,7 @@ export interface GribInfoResponse {
 export interface PluginSettings {
   gribDir: string;
   autoGribEnabled?: boolean;
-  polarPath: string;
+  polarPerformanceUrl?: string;
   algorithm?: string;
   hideTestButtons?: boolean;
   headingStep?: number;

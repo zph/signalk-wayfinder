@@ -44,7 +44,7 @@ test('explains every missing input without a safety fallback', () => {
     configuredDraftPath: 'design.draft.current',
   });
   assert.equal(capabilities.ready, false);
-  assert.match(capabilities.unavailableReason ?? '', /a polar/);
+  assert.match(capabilities.unavailableReason ?? '', /an active Polar Performance polar/);
   assert.match(capabilities.unavailableReason ?? '', /forecast coverage/);
   assert.match(capabilities.unavailableReason ?? '', /shoreline index/);
 });

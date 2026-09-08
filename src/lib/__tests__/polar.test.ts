@@ -1,10 +1,6 @@
-import { test, before, after } from 'node:test';
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import * as fs from 'node:fs';
-import * as fsp from 'node:fs/promises';
-import * as os from 'node:os';
-import * as path from 'node:path';
-import { parsePolar, interpolateBoatSpeed } from '../polar';
+import { interpolateBoatSpeed } from '../polar';
 import { PolarData } from '../../types';
 
 // Minimal inline polar for testing — minimum TWA is 30° (realistic tacking angle):
@@ -12,34 +8,15 @@ import { PolarData } from '../../types';
 // TWA: 30 →  3,  5
 //       90 →  5, 10
 //      180 →  3,  6
-const POLAR_CSV = ['twa/tws;10;20', '30;3;5', '90;5;10', '180;3;6'].join('\n');
-
-let tmpDir: string;
-let polar: PolarData;
-
-before(async () => {
-  tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'polar-test-'));
-  const tmpFile = path.join(tmpDir, 'polar.csv');
-  fs.writeFileSync(tmpFile, POLAR_CSV);
-  polar = parsePolar(tmpFile);
-});
-
-after(async () => {
-  if (tmpDir) await fsp.rm(tmpDir, { recursive: true, force: true });
-});
-
-test('parsePolar: parses header TWS values', () => {
-  assert.deepStrictEqual(polar.tws, [10, 20]);
-});
-
-test('parsePolar: parses TWA rows', () => {
-  assert.deepStrictEqual(polar.twa, [30, 90, 180]);
-});
-
-test('parsePolar: speeds array shape', () => {
-  assert.strictEqual(polar.speeds.length, 3);
-  assert.deepStrictEqual(polar.speeds[1], [5, 10]);
-});
+const polar: PolarData = {
+  tws: [10, 20],
+  twa: [30, 90, 180],
+  speeds: [
+    [3, 5],
+    [5, 10],
+    [3, 6],
+  ],
+};
 
 test('interpolateBoatSpeed: exact grid point TWA=90 TWS=10 → 5 kt', () => {
   const spd = interpolateBoatSpeed(polar, 90, 10);

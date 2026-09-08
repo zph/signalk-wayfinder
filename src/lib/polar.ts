@@ -1,34 +1,6 @@
-// Polar diagram loading (ORC/OpenCPN semicolon-delimited CSV) and bilinear boat-speed interpolation.
+// Bilinear boat-speed interpolation over the canonical Polar Performance table snapshot.
 
-import * as fs from 'node:fs';
 import { PolarData } from '../types';
-
-export function parsePolar(filePath: string): PolarData {
-  const lines = fs
-    .readFileSync(filePath, 'utf-8')
-    .split('\n')
-    .map((l) => l.trim())
-    .filter((l) => l.length > 0 && !l.startsWith('#'));
-
-  // Header: twa/tws;6;8;10;12;14;16;20
-  const header = lines[0].split(';');
-  const tws = header
-    .slice(1)
-    .map(Number)
-    .filter((v) => !isNaN(v));
-
-  const twa: number[] = [];
-  const speeds: number[][] = [];
-
-  for (let i = 1; i < lines.length; i++) {
-    const parts = lines[i].split(';').map(Number);
-    if (isNaN(parts[0])) continue;
-    twa.push(parts[0]);
-    speeds.push(parts.slice(1, 1 + tws.length));
-  }
-
-  return { tws, twa, speeds };
-}
 
 export function interpolateBoatSpeed(polar: PolarData, twaDeg: number, twsKnots: number): number {
   // Polar is symmetric: use absolute TWA clamped to 0–180
