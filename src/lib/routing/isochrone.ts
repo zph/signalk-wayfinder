@@ -66,8 +66,10 @@ class FrontierAccumulator<T extends { lat: number; lon: number }> {
   private readonly counts: Uint8Array;
   private readonly firstDistances: Float64Array;
   private readonly secondDistances: Float64Array;
+  private readonly thirdDistances: Float64Array;
   private readonly firstPoints: Array<T | undefined>;
   private readonly secondPoints: Array<T | undefined>;
+  private readonly thirdPoints: Array<T | undefined>;
   private readonly activeSectors: number[] = [];
   private pendingSector = -1;
   private pendingIndex = -1;
@@ -78,14 +80,18 @@ class FrontierAccumulator<T extends { lat: number; lon: number }> {
     private readonly startLon: number,
     private readonly sectorSize: number,
     private readonly lanes = 1,
+    private readonly targetLat?: number,
+    private readonly targetLon?: number,
   ) {
     this.longitudeScale = Math.cos(startLat * DEG_TO_RAD);
     const sectorCount = Math.ceil(360 / sectorSize) * lanes;
     this.counts = new Uint8Array(sectorCount);
     this.firstDistances = new Float64Array(sectorCount);
     this.secondDistances = new Float64Array(sectorCount);
+    this.thirdDistances = new Float64Array(sectorCount);
     this.firstPoints = new Array<T | undefined>(sectorCount);
     this.secondPoints = new Array<T | undefined>(sectorCount);
+    this.thirdPoints = new Array<T | undefined>(sectorCount);
   }
 
   consider(lat: number, lon: number, lane = 0): boolean {
@@ -97,12 +103,34 @@ class FrontierAccumulator<T extends { lat: number; lon: number }> {
     const dLon = (lon - this.startLon) * this.longitudeScale;
     const distSq = dLat * dLat + dLon * dLon;
     const count = this.counts[sector];
-    const index = count < 2 ? count : this.firstDistances[sector] <= this.secondDistances[sector] ? 0 : 1;
-    const accepted = count < 2 || distSq > (index === 0 ? this.firstDistances[sector] : this.secondDistances[sector]);
+    const targetEnabled = this.targetLat !== undefined && this.targetLon !== undefined;
+    const capacity = targetEnabled ? 3 : 2;
+    let index = Math.min(count, capacity - 1);
+    let candidateDistance = distSq;
+    let accepted = count < capacity;
+    if (count >= capacity) {
+      const fartherIndex = this.firstDistances[sector] <= this.secondDistances[sector] ? 0 : 1;
+      if (distSq > (fartherIndex === 0 ? this.firstDistances[sector] : this.secondDistances[sector])) {
+        index = fartherIndex;
+        accepted = true;
+      }
+    }
+    if (!accepted && targetEnabled) {
+      const targetDLat = lat - this.targetLat;
+      const targetDLon = (lon - this.targetLon) * this.longitudeScale;
+      candidateDistance = targetDLat * targetDLat + targetDLon * targetDLon;
+      index = 2;
+      accepted = candidateDistance < this.thirdDistances[sector];
+    }
     if (!accepted) return false;
+    if (count === 2 && targetEnabled) {
+      const targetDLat = lat - this.targetLat;
+      const targetDLon = (lon - this.targetLon) * this.longitudeScale;
+      candidateDistance = targetDLat * targetDLat + targetDLon * targetDLon;
+    }
     this.pendingSector = sector;
     this.pendingIndex = index;
-    this.pendingDistance = distSq;
+    this.pendingDistance = candidateDistance;
     return true;
   }
 
@@ -112,10 +140,16 @@ class FrontierAccumulator<T extends { lat: number; lon: number }> {
       this.firstPoints[sector] = point;
       this.firstDistances[sector] = this.pendingDistance;
     } else {
-      this.secondPoints[sector] = point;
-      this.secondDistances[sector] = this.pendingDistance;
+      if (this.pendingIndex === 1) {
+        this.secondPoints[sector] = point;
+        this.secondDistances[sector] = this.pendingDistance;
+      } else {
+        this.thirdPoints[sector] = point;
+        this.thirdDistances[sector] = this.pendingDistance;
+      }
     }
-    if (this.counts[sector] < 2) {
+    const capacity = this.targetLat !== undefined && this.targetLon !== undefined ? 3 : 2;
+    if (this.counts[sector] < capacity) {
       if (this.counts[sector] === 0) this.activeSectors.push(sector);
       this.counts[sector]++;
     }
@@ -129,7 +163,8 @@ class FrontierAccumulator<T extends { lat: number; lon: number }> {
     const result: T[] = [];
     for (const sector of this.activeSectors) {
       result.push(this.firstPoints[sector]!);
-      if (this.counts[sector] === 2) result.push(this.secondPoints[sector]!);
+      if (this.counts[sector] >= 2) result.push(this.secondPoints[sector]!);
+      if (this.counts[sector] === 3) result.push(this.thirdPoints[sector]!);
     }
     return result;
   }
@@ -549,6 +584,8 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
         start.lon,
         sectorSize,
         Math.max(1, corridorAnchors.length),
+        end.lat,
+        end.lon,
       );
       const stepArrivals: IsochronePoint[] = [];
 
