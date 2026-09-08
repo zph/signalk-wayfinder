@@ -759,8 +759,6 @@ module.exports = (app: SignalKApp) => {
             const acquired = await ensureAutoGrib({
               points,
               departureTime: new Date(departureMs),
-              planningSpeedKn: Math.max(1, Number(mergedOptions.motorSpeedKn ?? 6) || 6),
-              maxHoursPerDay: Number(mergedOptions.maxHoursPerDay ?? 0),
               gribDir: settings.gribDir,
             });
             app.debug(
@@ -1033,7 +1031,7 @@ module.exports = (app: SignalKApp) => {
                 depthProvider,
                 navigationConstraints,
               });
-              if (quality.valid) {
+              if (quality.valid && !outcome.warning) {
                 candidates.push({
                   route: outcome.route,
                   warning: outcome.warning,
@@ -1042,10 +1040,11 @@ module.exports = (app: SignalKApp) => {
                 });
               } else {
                 lastCandidateError = new Error(
-                  `Route quality checks failed: ${quality.issues
-                    .filter((issue) => issue.severity === 'error')
-                    .map((issue) => issue.message)
-                    .join(' ')}`,
+                  outcome.warning ??
+                    `Route quality checks failed: ${quality.issues
+                      .filter((issue) => issue.severity === 'error')
+                      .map((issue) => issue.message)
+                      .join(' ')}`,
                 );
               }
             } catch (error) {

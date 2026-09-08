@@ -3,13 +3,10 @@
 import * as fs from 'node:fs/promises';
 import * as nodepath from 'node:path';
 import type { LatLon } from '../types';
-import { haversineNM } from './geo';
 
 export interface AutoGribRequest {
   points: LatLon[];
   departureTime: Date;
-  planningSpeedKn: number;
-  maxHoursPerDay: number;
   gribDir: string;
 }
 
@@ -40,20 +37,6 @@ function paddedBounds(points: LatLon[]): [number, number, number, number] {
     Math.min(180, Math.ceil(Math.max(...lons) + 1)),
     Math.min(89, Math.ceil(Math.max(...lats) + 1)),
   ];
-}
-
-export function estimateForecastHours(request: AutoGribRequest): number {
-  let distanceNm = 0;
-  for (let i = 1; i < request.points.length; i++)
-    distanceNm += haversineNM(
-      request.points[i - 1].lat,
-      request.points[i - 1].lon,
-      request.points[i].lat,
-      request.points[i].lon,
-    );
-  const underwayHours = distanceNm / Math.max(1, request.planningSpeedKn);
-  const elapsedHours = request.maxHoursPerDay > 0 ? underwayHours * (24 / request.maxHoursPerDay) : underwayHours;
-  return Math.min(MAX_FORECAST_HOURS, Math.max(24, Math.ceil((elapsedHours * 1.35 + 12) / 3) * 3));
 }
 
 function queryUrl(kind: 'wind' | 'wave', cycle: Date, hour: number, bounds: [number, number, number, number]): URL {
@@ -105,13 +88,14 @@ export async function ensureAutoGrib(
 ): Promise<AutoGribResult> {
   const cycle = gfsCycle(now);
   const leadHours = Math.max(0, (request.departureTime.getTime() - cycle.getTime()) / 3_600_000);
-  const durationHours = estimateForecastHours(request);
-  const finalHour = Math.ceil((leadHours + durationHours) / 3) * 3;
+  // Always acquire the complete model horizon for this route's geographic subset. Sailing speed,
+  // daylight rests, and future winds make duration estimates unreliable, while a truncated bundle
+  // can turn an otherwise routable passage into a misleading partial result.
+  const finalHour = MAX_FORECAST_HOURS;
   if (request.departureTime.getTime() < cycle.getTime() - 3 * 3_600_000)
     throw new Error('Automatic GFS acquisition cannot serve historical departures; load an archived GRIB instead');
-  if (finalHour > MAX_FORECAST_HOURS)
-    throw new Error(`Requested passage exceeds the ${MAX_FORECAST_HOURS}-hour GFS forecast window`);
-
+  if (leadHours > MAX_FORECAST_HOURS)
+    throw new Error(`Departure is beyond the ${MAX_FORECAST_HOURS}-hour GFS forecast window`);
   const bounds = paddedBounds(request.points);
   const startHour = Math.max(0, Math.floor(leadHours / 3) * 3);
   const hours: number[] = [];

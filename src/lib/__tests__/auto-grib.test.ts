@@ -3,7 +3,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as nodepath from 'node:path';
 import test from 'node:test';
-import { ensureAutoGrib, estimateForecastHours } from '../auto-grib';
+import { ensureAutoGrib } from '../auto-grib';
 
 const request = {
   points: [
@@ -11,15 +11,8 @@ const request = {
     { lat: 38.05, lon: -122.4 },
   ],
   departureTime: new Date('2026-09-08T12:00:00Z'),
-  planningSpeedKn: 6,
-  maxHoursPerDay: 8,
   gribDir: '',
 };
-
-test('estimateForecastHours accounts for daily underway limit and includes contingency', () => {
-  assert.ok(estimateForecastHours(request) >= 24);
-  assert.equal(estimateForecastHours({ ...request, maxHoursPerDay: 0 }), 24);
-});
 
 test('ensureAutoGrib downloads wind and wave subsets then reuses the route cache', async () => {
   const dir = await fs.mkdtemp(nodepath.join(os.tmpdir(), 'wayfinder-grib-'));
@@ -32,6 +25,7 @@ test('ensureAutoGrib downloads wind and wave subsets then reuses the route cache
   try {
     const first = await ensureAutoGrib({ ...request, gribDir: dir }, fetcher, new Date('2026-09-08T14:00:00Z'));
     assert.equal(first.cacheHit, false);
+    assert.equal(first.forecastHours, 384);
     assert.ok(calls > 0);
     assert.ok((await fs.stat(first.path)).size > 16);
     const callsAfterFirst = calls;
