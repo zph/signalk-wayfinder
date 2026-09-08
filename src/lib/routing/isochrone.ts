@@ -401,6 +401,16 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
 
           const distToEnd = haversineNM(newLat, newLon, end.lat, end.lon);
           if (distToEnd <= arrivalRadiusNm) {
+            const finalArrivalTime = new Date(nextTime.getTime() + (distToEnd / effectiveSpeed) * 3_600_000);
+            const finalBudget = advanceUnderwayBudget({
+              start: nextTime,
+              end: finalArrivalTime,
+              departure: departureTime,
+              currentDayIndex: underwayBudget.passageDayIndex,
+              currentHoursToday: underwayBudget.hoursToday,
+              maxHoursPerDay,
+              underway: true,
+            });
             const arrivalBlockedByLand =
               edgeIndex !== null && segmentCrossesLandFast(edgeIndex, newLat, newLon, end.lat, end.lon);
             const arrivalSafetyViolation = navigationConstraintViolation(
@@ -413,6 +423,8 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
               end.lon,
             );
             if (
+              finalBudget.allowed &&
+              (!daylightOnly || isLegInDaylight(nextTime, finalArrivalTime, { lat: newLat, lon: newLon }, end)) &&
               !arrivalBlockedByLand &&
               !arrivalSafetyViolation &&
               (!arrived || distToEnd < haversineNM(arrived.lat, arrived.lon, end.lat, end.lon))
@@ -588,18 +600,25 @@ function backtrack(
   const route: RoutePoint[] = [];
 
   if (includeEnd && end) {
+    const distanceNm = haversineNM(arrived.lat, arrived.lon, end.lat, end.lon);
+    const boatSpeed = arrived.boatSpeed ?? 0;
+    if (boatSpeed <= 0) throw new Error('Cannot time the final arrival leg without a positive boat speed');
+    const arrivalTime = new Date(arrived.time.getTime() + (distanceNm / boatSpeed) * 3_600_000);
+    const resampled = wind.getWind(end.lat, end.lon, nearestIdx(wind.times, arrivalTime));
+    const resampledWindDir = windDirection(resampled.u, resampled.v);
+    const heading = bearingTo(arrived.lat, arrived.lon, end.lat, end.lon);
     route.unshift({
       lat: end.lat,
       lon: end.lon,
-      time: arrived.time,
-      heading: arrived.heading,
-      twa: arrived.twa,
-      tws: arrived.tws,
-      boatSpeed: arrived.boatSpeed,
+      time: arrivalTime,
+      heading,
+      twa: trueWindAngle(heading, resampledWindDir),
+      tws: windSpeedKnots(resampled.u, resampled.v),
+      boatSpeed,
       propulsion: arrived.propulsion,
-      windDir: arrived.windDir,
+      windDir: resampledWindDir,
       legCalcMs: 0,
-      waveHeight: wind.getWave(end.lat, end.lon, arrived.time),
+      waveHeight: wind.getWave(end.lat, end.lon, arrivalTime),
       gribFilePath: arrived.gribFilePath,
     });
   }

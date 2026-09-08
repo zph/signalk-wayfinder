@@ -13,6 +13,7 @@ import {
 import { MultiFileWindProvider } from '../windprovider';
 import { buildLandEdgeIndex } from '../landmask';
 import { isLegInDaylight, passageDayIndex } from '../passage-constraints';
+import { haversineNM } from '../geo';
 
 // Build a tiny synthetic GRIB: 3×3 grid, 2 time steps, constant 5 m/s southerly wind
 function makeGrib(times?: Date[]): GribData {
@@ -220,6 +221,15 @@ test('calculate: arrives when destination is within arrival radius', async () =>
   assert.strictEqual(route[0].lon, 11);
   // Last point is the destination
   assert.ok(Math.abs(route[route.length - 1].lat - 41.05) < 0.5);
+  const penultimate = route[route.length - 2];
+  const destination = route[route.length - 1];
+  assert.ok(destination.time.getTime() > penultimate.time.getTime(), 'final arrival leg should add passage time');
+  const expectedFinalHours =
+    haversineNM(penultimate.lat, penultimate.lon, destination.lat, destination.lon) / (destination.boatSpeed ?? 0);
+  assert.ok(
+    Math.abs((destination.time.getTime() - penultimate.time.getTime()) / 3_600_000 - expectedFinalHours) < 1e-6,
+    'final arrival leg time should equal distance divided by boat speed',
+  );
 });
 
 test('calculate: every RoutePoint has a non-negative legCalcMs; start point is 0', async () => {
