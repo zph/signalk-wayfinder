@@ -5,6 +5,7 @@ import {
   minimumShoreDistanceAlongSegmentNm,
   navigationConstraintViolation,
   segmentHasShoreClearance,
+  segmentHasShoreClearanceWithEndpointAllowance,
   segmentStaysWithinShoreDistance,
 } from '../navigation-safety';
 import { LandPolygon } from '../../types';
@@ -27,6 +28,49 @@ test('minimumShoreDistanceAlongSegmentNm measures a route corridor against shore
 test('segmentHasShoreClearance rejects a leg inside the configured clearance', () => {
   assert.equal(segmentHasShoreClearance(shoreline, 0.5, 1.1, 1.5, 1.1, 5), true);
   assert.equal(segmentHasShoreClearance(shoreline, 0.5, 1.1, 1.5, 1.1, 7), false);
+});
+
+test('endpoint allowance permits a close departure but requires clearance after its approach zone', () => {
+  const endpoints = {
+    start: { lat: 0.5, lon: 1.001 },
+    end: { lat: 1.8, lon: 2 },
+  };
+  assert.equal(
+    segmentHasShoreClearanceWithEndpointAllowance(
+      shoreline,
+      0.5,
+      1.001,
+      0.5,
+      1.005,
+      0.5,
+      endpoints,
+    ),
+    true,
+  );
+  assert.equal(
+    segmentHasShoreClearanceWithEndpointAllowance(
+      shoreline,
+      0.5,
+      1.001,
+      0.5,
+      1.01,
+      0.5,
+      endpoints,
+    ),
+    true,
+  );
+  assert.equal(
+    segmentHasShoreClearanceWithEndpointAllowance(
+      shoreline,
+      0.51,
+      1.001,
+      0.52,
+      1.001,
+      0.5,
+      endpoints,
+    ),
+    false,
+  );
 });
 
 test('segmentStaysWithinShoreDistance rejects a route too far offshore', () => {

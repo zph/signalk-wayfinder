@@ -109,6 +109,23 @@ test('fails a route whose TWA disagrees with heading and resampled wind directio
   assert.ok(report.issues.some((issue) => issue.code === 'twa-mismatch' && issue.severity === 'error'));
 });
 
+test('records repeated low-headway tacks for alternative scoring without rejecting them', () => {
+  const route = [
+    point({ heading: 0, twa: 0, boatSpeed: undefined }),
+    point({ lon: 19.001, heading: 135, windDir: 180, twa: 45, propulsion: 'sail' }),
+    point({ lon: 19.002, heading: 225, windDir: 180, twa: 45, propulsion: 'sail' }),
+    point({ lon: 19.003, heading: 135, windDir: 180, twa: 45, propulsion: 'sail' }),
+    point({ lon: 19.004, heading: 225, windDir: 180, twa: 45, propulsion: 'sail' }),
+  ].map((routePoint, index) => ({
+    ...routePoint,
+    time: new Date(Date.parse('2026-06-06T06:00:00Z') + index * 60_000),
+  }));
+  const report = assessRouteQuality(route, context({ end: { lat: 58.6, lon: 19.004 } }));
+  assert.equal(report.valid, true);
+  assert.equal(report.metrics.maneuverCount, 3);
+  assert.equal(report.metrics.lowHeadwayManeuverCount, 3);
+});
+
 test('fails implausible wind values that can indicate an unhandled GRIB fill cell', () => {
   const route = validRoute();
   route[1].tws = 19_438;

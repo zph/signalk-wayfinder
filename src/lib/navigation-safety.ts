@@ -10,6 +10,11 @@ export interface NavigationConstraints {
   maximumOffshoreDistanceNm: number;
 }
 
+export interface ShoreClearanceEndpoints {
+  start: { lat: number; lon: number };
+  end: { lat: number; lon: number };
+}
+
 export type NavigationConstraintViolation =
   'depth-unavailable' | 'too-shallow' | 'too-close-to-shore' | 'too-far-offshore';
 
@@ -171,6 +176,43 @@ export function segmentHasShoreClearance(
   return distance === undefined || distance >= minimumDistanceNm;
 }
 
+// A marina, anchorage, or chart-selected endpoint may legitimately be closer to shore than the
+// passage-wide clearance. Allow only the short approach/departure zone around that endpoint; once
+// a leg leaves the zone its water-side point must already meet the full clearance, and every later
+// leg is checked end-to-end. This prevents the endpoint exception from turning into permission to
+// follow a coastline for the whole passage.
+export function segmentHasShoreClearanceWithEndpointAllowance(
+  index: LandEdgeIndex,
+  lat1: number,
+  lon1: number,
+  lat2: number,
+  lon2: number,
+  minimumDistanceNm: number,
+  endpoints: ShoreClearanceEndpoints,
+): boolean {
+  if (!(minimumDistanceNm > 0)) return true;
+  const inZone = (lat: number, lon: number, endpoint: { lat: number; lon: number }): boolean =>
+    haversineNM(lat, lon, endpoint.lat, endpoint.lon) <= minimumDistanceNm;
+  const firstInStart = inZone(lat1, lon1, endpoints.start);
+  const secondInStart = inZone(lat2, lon2, endpoints.start);
+  const firstInEnd = inZone(lat1, lon1, endpoints.end);
+  const secondInEnd = inZone(lat2, lon2, endpoints.end);
+
+  if ((firstInStart && secondInStart) || (firstInEnd && secondInEnd)) return true;
+  if (firstInStart || secondInEnd) {
+    const waterPoint = firstInStart ? { lat: lat2, lon: lon2 } : { lat: lat1, lon: lon1 };
+    return segmentHasShoreClearance(
+      index,
+      waterPoint.lat,
+      waterPoint.lon,
+      waterPoint.lat,
+      waterPoint.lon,
+      minimumDistanceNm,
+    );
+  }
+  return segmentHasShoreClearance(index, lat1, lon1, lat2, lon2, minimumDistanceNm);
+}
+
 function pointIsWithinShoreDistance(
   index: LandEdgeIndex,
   lat: number,
@@ -212,11 +254,29 @@ export function navigationConstraintViolation(
   lon1: number,
   lat2: number,
   lon2: number,
+  shorelineEndpoints?: ShoreClearanceEndpoints,
 ): NavigationConstraintViolation | undefined {
   if (
     constraints.minimumShoreDistanceNm > 0 &&
     (!shorelineIndex ||
-      !segmentHasShoreClearance(shorelineIndex, lat1, lon1, lat2, lon2, constraints.minimumShoreDistanceNm))
+      !(shorelineEndpoints
+        ? segmentHasShoreClearanceWithEndpointAllowance(
+            shorelineIndex,
+            lat1,
+            lon1,
+            lat2,
+            lon2,
+            constraints.minimumShoreDistanceNm,
+            shorelineEndpoints,
+          )
+        : segmentHasShoreClearance(
+            shorelineIndex,
+            lat1,
+            lon1,
+            lat2,
+            lon2,
+            constraints.minimumShoreDistanceNm,
+          )))
   ) {
     return 'too-close-to-shore';
   }

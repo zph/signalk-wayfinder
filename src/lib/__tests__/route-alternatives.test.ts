@@ -117,6 +117,18 @@ test('fastest ranks complete routes by duration and removes duplicate geometry',
   );
 });
 
+test('fastest penalizes excessive and low-headway maneuvers without rejecting the route', () => {
+  const direct = alternative(19.1, 5);
+  const thrashing = alternative(19.2, 4, {
+    maneuverCount: 6,
+    lowHeadwayManeuverCount: 4,
+  });
+  const ranked = rankDistinctAlternatives([thrashing, direct], 'fastest', 2);
+  assert.equal(ranked[0].summary.durationHours, 5);
+  assert.equal(ranked[1].summary.durationHours, 4);
+  assert.equal(ranked[1].summary.quality.valid, true);
+});
+
 test('least-motoring ranks motor hours before elapsed duration', () => {
   const ranked = rankDistinctAlternatives(
     [alternative(19.1, 5, { motorHours: 2 }), alternative(19.2, 8, { motorHours: 0 })],

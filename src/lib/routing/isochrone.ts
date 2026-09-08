@@ -889,6 +889,7 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
                 point.lon,
                 newLat,
                 newLon,
+                { start, end },
               )
             : undefined;
           if (profiling) phaseProfiler.record('safety', phaseStarted);
@@ -969,6 +970,7 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
                   newLon,
                   end.lat,
                   end.lon,
+                  { start, end },
                 )
               : undefined;
             if (profiling) phaseProfiler.record('safety', phaseStarted);

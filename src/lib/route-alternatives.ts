@@ -101,19 +101,40 @@ function weatherScore(summary: RouteAlternativeSummary): number {
   return waveScore + summary.averageWindKn * 2 + summary.maximumWindKn;
 }
 
+// A normal maneuver costs roughly three minutes in the ranking. A tack or jibe that advances less
+// than 0.5 nm toward the destination carries another fifteen-minute cost. These are ranking costs,
+// not invented passage time and not validity failures.
+function maneuverPenaltyHours(summary: RouteAlternativeSummary): number {
+  const metrics = summary.quality.metrics;
+  return (metrics.maneuverCount ?? 0) * 0.05 + (metrics.lowHeadwayManeuverCount ?? 0) * 0.25;
+}
+
 export function compareAlternativeSummaries(a: RouteAlternativeSummary, b: RouteAlternativeSummary): number {
   if (a.complete !== b.complete) return a.complete ? -1 : 1;
   const warningDifference = qualityWarningCount(a) - qualityWarningCount(b);
   if (warningDifference !== 0) return warningDifference;
   if (a.objective === 'leastMotoring') {
-    return a.motorHours - b.motorHours || a.durationHours - b.durationHours || a.distanceNm - b.distanceNm;
+    return (
+      a.motorHours - b.motorHours ||
+      a.durationHours + maneuverPenaltyHours(a) -
+        (b.durationHours + maneuverPenaltyHours(b)) ||
+      a.distanceNm - b.distanceNm
+    );
   }
   if (a.objective === 'bestWeather') {
     if (a.averageWaveHeightM === null && b.averageWaveHeightM !== null) return 1;
     if (a.averageWaveHeightM !== null && b.averageWaveHeightM === null) return -1;
-    return weatherScore(a) - weatherScore(b) || a.durationHours - b.durationHours || a.distanceNm - b.distanceNm;
+    return (
+      weatherScore(a) - weatherScore(b) ||
+      maneuverPenaltyHours(a) - maneuverPenaltyHours(b) ||
+      a.durationHours - b.durationHours ||
+      a.distanceNm - b.distanceNm
+    );
   }
-  return a.durationHours - b.durationHours || a.distanceNm - b.distanceNm;
+  return (
+    a.durationHours + maneuverPenaltyHours(a) - (b.durationHours + maneuverPenaltyHours(b)) ||
+    a.distanceNm - b.distanceNm
+  );
 }
 
 export function routeGeometryKey(route: RoutePoint[]): string {

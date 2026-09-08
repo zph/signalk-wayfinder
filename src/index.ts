@@ -707,11 +707,18 @@ module.exports = (app: SignalKApp) => {
           return void res.status(503).json({ error: 'Shoreline distance constraints require the shoreline index' });
         }
 
+        // Shoreline clearance applies to the passage, not to the exact marina/anchorage pin. Land,
+        // depth, and offshore checks remain strict at both endpoints; the routing engine tapers the
+        // shore-clearance exception away within one configured-clearance radius.
+        const endpointConstraints = {
+          ...navigationConstraints,
+          minimumShoreDistanceNm: 0,
+        };
         const endpointViolation = (point: LatLon): ReturnType<typeof navigationConstraintViolation> =>
           navigationConstraintViolation(
             shorelineIndex,
             depthProvider,
-            navigationConstraints,
+            endpointConstraints,
             point.lat,
             point.lon,
             point.lat,

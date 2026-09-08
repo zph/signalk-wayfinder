@@ -225,6 +225,8 @@ export interface RouteQualityReport {
     maximumWaveHeightM: number | null;
     averageWindKn: number;
     maximumWindKn: number;
+    maneuverCount?: number;
+    lowHeadwayManeuverCount?: number;
   };
 }
 

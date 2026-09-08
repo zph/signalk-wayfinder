@@ -20,6 +20,7 @@ import { navigationConstraintViolation, type NavigationConstraints } from './nav
 const ENDPOINT_TOLERANCE_NM = 0.1;
 const TWA_TOLERANCE_DEG = 1;
 const ABRUPT_WIND_SHIFT_DEG = 60;
+const MIN_MANEUVER_HEADWAY_NM = 0.5;
 
 export interface RouteQualityContext {
   start: { lat: number; lon: number };
@@ -43,6 +44,13 @@ export interface RouteQualityContext {
 function angularDifference(a: number, b: number): number {
   const diff = Math.abs(((((a - b) % 360) + 540) % 360) - 180);
   return diff;
+}
+
+function sailingSide(point: RoutePoint): -1 | 1 | undefined {
+  if (point.propulsion !== 'sail') return undefined;
+  const relative = ((((point.windDir - point.heading) % 360) + 540) % 360) - 180;
+  if (Math.abs(relative) < 0.5 || Math.abs(relative) > 179.5) return undefined;
+  return relative > 0 ? 1 : -1;
 }
 
 function isCoordinate(point: RoutePoint): boolean {
@@ -80,6 +88,10 @@ export function assessRouteQuality(route: RoutePoint[], context: RouteQualityCon
   let windSpeedTotal = 0;
   let windSpeedCount = 0;
   let maximumWindKn = 0;
+  let previousSailingSide: -1 | 1 | undefined;
+  let lastManeuverPoint: RoutePoint | undefined;
+  let maneuverCount = 0;
+  let lowHeadwayManeuverCount = 0;
 
   if (route.length < 2) add('too-few-points', 'error', 'Route has fewer than two points.');
 
@@ -138,6 +150,7 @@ export function assessRouteQuality(route: RoutePoint[], context: RouteQualityCon
       previous.lon,
       point.lat,
       point.lon,
+      context.end ? { start: context.start, end: context.end } : undefined,
     );
     if (safetyViolation === 'depth-unavailable') {
       add('depth-coverage-missing', 'error', `Route leg ${i} has no numeric bathymetry coverage.`);
@@ -237,6 +250,23 @@ export function assessRouteQuality(route: RoutePoint[], context: RouteQualityCon
       );
     }
 
+    const side = sailingSide(point);
+    if (side !== undefined) {
+      if (previousSailingSide !== undefined && side !== previousSailingSide && context.end) {
+        maneuverCount++;
+        const maneuverStart = lastManeuverPoint ?? route[0];
+        const headwayNm =
+          haversineNM(maneuverStart.lat, maneuverStart.lon, context.end.lat, context.end.lon) -
+          haversineNM(point.lat, point.lon, context.end.lat, context.end.lon);
+        if (headwayNm < MIN_MANEUVER_HEADWAY_NM) lowHeadwayManeuverCount++;
+        lastManeuverPoint = point;
+      }
+      previousSailingSide = side;
+    } else if (point.propulsion !== 'wait') {
+      previousSailingSide = undefined;
+      lastManeuverPoint = undefined;
+    }
+
     if (point.tws > context.polar.tws[context.polar.tws.length - 1]) {
       add(
         'polar-wind-cap',
@@ -317,6 +347,8 @@ export function assessRouteQuality(route: RoutePoint[], context: RouteQualityCon
       maximumWaveHeightM,
       averageWindKn: windSpeedCount > 0 ? windSpeedTotal / windSpeedCount : 0,
       maximumWindKn,
+      maneuverCount,
+      lowHeadwayManeuverCount,
     },
   };
 }
