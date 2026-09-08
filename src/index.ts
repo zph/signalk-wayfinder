@@ -662,7 +662,11 @@ module.exports = (app: SignalKApp) => {
           return void res.status(400).json({ error: `Unknown algorithm: ${algorithmId}` });
         }
 
-        const useLandAvoidance = req.body?.useLandAvoidance !== false; // default true
+        if (req.body?.useLandAvoidance === false)
+          return void res.status(400).json({
+            error: 'Land avoidance is mandatory and cannot be disabled',
+          });
+        const useLandAvoidance = true;
         const useSafetyMargin = req.body?.useSafetyMargin === true;
         let chartGeometry: Awaited<ReturnType<typeof resolveChartGeometry>> = null;
         if (useLandAvoidance || Number(mergedOptions.minimumShoreDistanceNm ?? 0) > 0) {
