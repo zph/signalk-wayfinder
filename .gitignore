@@ -1,5 +1,6 @@
 dist/
 node_modules/
+sidecar/target/
 public/buildinfo.json
 *.tgz
 obsolete because claude did wrong/
