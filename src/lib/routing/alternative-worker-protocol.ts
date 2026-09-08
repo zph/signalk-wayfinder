@@ -35,6 +35,6 @@ export interface AlternativeWorkerTask {
 export type AlternativeWorkerMessage =
   | { type: 'ready' }
   | { type: 'progress'; attempt: number; fraction: number; frontier: Array<[number, number]> }
-  | { type: 'result'; attempt: number; route: RoutePoint[]; warning?: string }
+  | { type: 'result'; attempt: number; route: RoutePoint[]; routes?: RoutePoint[][]; warning?: string }
   | { type: 'taskError'; attempt: number; error: string; reason?: string }
   | { type: 'fatal'; error: string };

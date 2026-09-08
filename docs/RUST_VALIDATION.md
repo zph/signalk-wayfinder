@@ -58,11 +58,11 @@ Timing is informational and is not a CI pass/fail threshold because host load an
 
 An optimized seven-iteration run on the development ARM64 host produced:
 
-| Measurement | p50 | p95 |
-| --- | ---: | ---: |
+| Measurement      |      p50 |      p95 |
+| ---------------- | -------: | -------: |
 | Node calculation | 798.7 ms | 954.5 ms |
 | Rust calculation | 602.8 ms | 803.1 ms |
-| Rust end-to-end | 606.0 ms | 819.3 ms |
+| Rust end-to-end  | 606.0 ms | 819.3 ms |
 
 That is a 1.33× median calculation speedup and a 1.32× median end-to-end speedup. Both engines
 returned 30 route points with identical arrival time. This is an early synthetic baseline, not yet
@@ -74,13 +74,13 @@ still required.
 Exploratory long-profile runs were added after setting a 10× performance target. These batch
 figures are single measured runs after warmup, so they indicate scale rather than a stable baseline:
 
-| Profile | Alternatives | Node workers | Node wall time | Rust wall time | Speedup |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Standard | 5 | 4 | 2.61 s | 0.87 s | 2.99× |
-| Standard | 10 | 4 | 4.52 s | 1.60 s | 2.83× |
-| Long | 5 | 4 | 4.67 s | 1.79 s | 2.62× |
-| Long | 10 | 4 | 10.13 s | 3.94 s | 2.57× |
-| Long | 10 | 8 | 6.76 s | 3.96 s | 1.71× |
+| Profile  | Alternatives | Node workers | Node wall time | Rust wall time | Speedup |
+| -------- | -----------: | -----------: | -------------: | -------------: | ------: |
+| Standard |            5 |            4 |         2.61 s |         0.87 s |   2.99× |
+| Standard |           10 |            4 |         4.52 s |         1.60 s |   2.83× |
+| Long     |            5 |            4 |         4.67 s |         1.79 s |   2.62× |
+| Long     |           10 |            4 |        10.13 s |         3.94 s |   2.57× |
+| Long     |           10 |            8 |         6.76 s |         3.96 s |   1.71× |
 
 The long profile's single-route calculation was 1.33× faster in Rust, essentially unchanged from
 the standard profile. Increasing the Node pool from its default four workers to eight reduced the
@@ -92,3 +92,8 @@ A plausible route to 10× requires algorithmic changes: compute diverse alternat
 search instead of rerunning nearly identical searches, reduce exhaustive heading expansion, and
 reuse registered or memory-mapped forecast/index data across requests. Lower-level allocation and
 sector-pruning improvements may help, but are unlikely to close the gap by themselves.
+
+The first algorithmic change is now implemented in Node; see
+[SHARED_ALTERNATIVE_SEARCH.md](SHARED_ALTERNATIVE_SEARCH.md). Node is retained as the production
+engine while this design is validated because the optimization comes from shared work rather than
+from the language port.

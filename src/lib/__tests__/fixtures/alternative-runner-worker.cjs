@@ -10,21 +10,25 @@ parentPort.on('message', (task) => {
     frontier: [[task.attempt, task.attempt]],
   });
   setTimeout(() => {
+    const route = [
+      {
+        lat: task.attempt,
+        lon: 0,
+        time: new Date('2026-06-06T00:00:00Z'),
+        heading: 0,
+        twa: 0,
+        tws: 10,
+        windDir: 180,
+        legCalcMs: 0,
+      },
+    ];
     parentPort.postMessage({
       type: 'result',
       attempt: task.attempt,
-      route: [
-        {
-          lat: task.attempt,
-          lon: 0,
-          time: new Date('2026-06-06T00:00:00Z'),
-          heading: 0,
-          twa: 0,
-          tws: 10,
-          windDir: 180,
-          legCalcMs: 0,
-        },
-      ],
+      route,
+      ...(task.options.routeCount
+        ? { routes: Array.from({ length: task.options.routeCount }, (_, index) => [{ ...route[0], lon: index }]) }
+        : {}),
     });
   }, 5);
 });

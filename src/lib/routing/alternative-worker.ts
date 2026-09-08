@@ -79,6 +79,7 @@ async function main(): Promise<void> {
     if (task.type !== 'run') return;
     try {
       const fullRoute: RoutePoint[] = [];
+      let sharedRoutes: RoutePoint[][] | undefined;
       const warnings: string[] = [];
       const legCount = initialization.points.length - 1;
       let continuationOptions = task.options;
@@ -106,6 +107,7 @@ async function main(): Promise<void> {
           { shorelineIndex: context.shorelineIndex, depthProvider: null },
         );
         if (result.warning) warnings.push(`Leg ${leg + 1}: ${result.warning}`);
+        if (legCount === 1 && result.alternatives) sharedRoutes = result.alternatives;
         fullRoute.push(...(leg === 0 ? result.route : result.route.slice(1)));
         const passageDeparture = fullRoute[0].time;
         const passageBudget = routeUnderwayBudget(
@@ -125,6 +127,7 @@ async function main(): Promise<void> {
         type: 'result',
         attempt: task.attempt,
         route: fullRoute,
+        ...(sharedRoutes ? { routes: sharedRoutes } : {}),
         ...(warnings.length > 0 ? { warning: warnings.join('; ') } : {}),
       });
     } catch (error) {

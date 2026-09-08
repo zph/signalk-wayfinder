@@ -11,8 +11,21 @@ import type {
 export interface AlternativeAttemptOutcome {
   attempt: number;
   route?: RoutePoint[];
+  routes?: RoutePoint[][];
   warning?: string;
   error?: Error;
+}
+
+export function expandSharedAlternativeOutcomes(outcomes: AlternativeAttemptOutcome[]): AlternativeAttemptOutcome[] {
+  return outcomes.flatMap((outcome) =>
+    outcome.routes
+      ? outcome.routes.map((route, attempt) => ({
+          attempt,
+          route,
+          ...(outcome.warning ? { warning: outcome.warning } : {}),
+        }))
+      : [outcome],
+  );
 }
 
 export function resolveAlternativeWorkerCount(
@@ -111,6 +124,7 @@ export async function runAlternativeAttempts(options: {
         outcomes.push({
           attempt: message.attempt,
           route: message.route,
+          ...(message.routes ? { routes: message.routes } : {}),
           ...(message.warning ? { warning: message.warning } : {}),
         });
       } else {

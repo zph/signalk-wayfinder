@@ -9,6 +9,26 @@ export const ROUTING_OBJECTIVES: readonly RoutingObjective[] = [
   'bestWeather',
 ];
 
+export function planAlternativeSearch(
+  base: Record<string, unknown>,
+  objective: RoutingObjective,
+  requestedCount: number,
+  allowSharedSearch: boolean,
+): { shared: boolean; tasks: Array<{ attempt: number; options: Record<string, unknown> }> } {
+  const shared = allowSharedSearch && requestedCount > 1;
+  const attemptCount = shared ? 1 : requestedCount === 1 ? 1 : Math.min(20, requestedCount * 2);
+  return {
+    shared,
+    tasks: Array.from({ length: attemptCount }, (_, attempt) => ({
+      attempt,
+      options: {
+        ...optionsForAlternative(base, objective, attempt, requestedCount),
+        ...(shared ? { sharedAlternativeCount: requestedCount } : {}),
+      },
+    })),
+  };
+}
+
 export interface RouteAlternative {
   route: RoutePoint[];
   warning?: string;

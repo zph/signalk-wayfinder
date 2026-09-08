@@ -24,5 +24,5 @@ export interface RoutingAlgorithm {
     onProgress: (pct: number, frontier: Array<[number, number]>) => void,
     options?: Record<string, unknown>,
     navigationSafety?: NavigationSafetyContext,
-  ): Promise<{ route: RoutePoint[]; warning?: string }>;
+  ): Promise<{ route: RoutePoint[]; warning?: string; alternatives?: RoutePoint[][] }>;
 }

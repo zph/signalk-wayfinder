@@ -7,6 +7,7 @@ import { performance } from 'node:perf_hooks';
 import type { Worker } from 'node:worker_threads';
 
 import type { GribData, GribFileEntry, LandPolygon, PolarData, RoutePoint } from '../src/types';
+import { haversineNM } from '../src/lib/geo';
 import { buildLandEdgeIndex, segmentCrossesLandFast } from '../src/lib/landmask';
 import { IsochroneAlgorithm } from '../src/lib/routing/isochrone';
 import { runAlternativeAttempts, resolveAlternativeWorkerCount } from '../src/lib/routing/alternative-worker-runner';
@@ -74,9 +75,30 @@ function assertClearRoute(route: RoutePoint[], land: ReturnType<typeof buildLand
   }
 }
 
-const times = Array.from({ length: profile === 'long' ? 97 : 37 }, (_, index) =>
-  new Date(Date.UTC(2024, 0, 1, index)),
-);
+function averageRouteSeparationNm(a: RoutePoint[], b: RoutePoint[]): number {
+  const samples = Math.min(12, Math.max(2, Math.min(a.length, b.length)));
+  let total = 0;
+  for (let sample = 1; sample < samples - 1; sample++) {
+    const fraction = sample / (samples - 1);
+    const pointA = a[Math.round(fraction * (a.length - 1))];
+    const pointB = b[Math.round(fraction * (b.length - 1))];
+    total += haversineNM(pointA.lat, pointA.lon, pointB.lat, pointB.lon);
+  }
+  return total / Math.max(1, samples - 2);
+}
+
+function minimumPairwiseSeparationNm(routes: RoutePoint[][]): number {
+  if (routes.length < 2) return 0;
+  let minimum = Infinity;
+  for (let first = 0; first < routes.length; first++) {
+    for (let second = first + 1; second < routes.length; second++) {
+      minimum = Math.min(minimum, averageRouteSeparationNm(routes[first], routes[second]));
+    }
+  }
+  return minimum;
+}
+
+const times = Array.from({ length: profile === 'long' ? 97 : 37 }, (_, index) => new Date(Date.UTC(2024, 0, 1, index)));
 const nLat = profile === 'long' ? 81 : 41;
 const nLon = profile === 'long' ? 81 : 41;
 const latMin = profile === 'long' ? 38 : 39;
@@ -162,18 +184,16 @@ const rustPayload = {
 };
 
 async function calculateNode(): Promise<RoutePoint[]> {
-  return (
-    await new IsochroneAlgorithm().calculate(
-      windProvider,
-      null,
-      polar,
-      land,
-      null,
-      request,
-      () => {},
-      options,
-    )
-  ).route;
+  return (await new IsochroneAlgorithm().calculate(windProvider, null, polar, land, null, request, () => {}, options))
+    .route;
+}
+
+async function calculateNodeShared(count: number): Promise<RoutePoint[][]> {
+  const result = await new IsochroneAlgorithm().calculate(windProvider, null, polar, land, null, request, () => {}, {
+    ...options,
+    sharedAlternativeCount: count,
+  });
+  return result.alternatives ?? [result.route];
 }
 
 async function calculateNodeBatch(count: number): Promise<RoutePoint[][]> {
@@ -261,28 +281,42 @@ async function main(): Promise<void> {
     const batches = [];
     for (const count of batchSizes) {
       await calculateNodeBatch(count);
+      await calculateNodeShared(count);
       await calculateRustBatch(client, count);
       const nodeBatchSamples: number[] = [];
+      const nodeSharedSamples: number[] = [];
       const rustBatchSamples: number[] = [];
       let nodeBatchRoutes: RoutePoint[][] = [];
+      let nodeSharedRoutes: RoutePoint[][] = [];
       let rustBatchRoutes: RoutePoint[][] = [];
       for (let iteration = 0; iteration < batchIterations; iteration += 1) {
         let started = performance.now();
         nodeBatchRoutes = await calculateNodeBatch(count);
         nodeBatchSamples.push(performance.now() - started);
         started = performance.now();
+        nodeSharedRoutes = await calculateNodeShared(count);
+        nodeSharedSamples.push(performance.now() - started);
+        started = performance.now();
         rustBatchRoutes = await calculateRustBatch(client, count);
         rustBatchSamples.push(performance.now() - started);
       }
-      for (const route of [...nodeBatchRoutes, ...rustBatchRoutes]) assertClearRoute(route, land);
+      for (const route of [...nodeBatchRoutes, ...nodeSharedRoutes, ...rustBatchRoutes]) assertClearRoute(route, land);
       const nodeBatch = metrics(nodeBatchSamples);
+      const nodeShared = metrics(nodeSharedSamples);
       const rustBatch = metrics(rustBatchSamples);
       batches.push({
         alternatives: count,
         nodeWorkers: resolveAlternativeWorkerCount(count, configuredNodeWorkers),
         node: nodeBatch,
+        nodeSharedSearch: nodeShared,
+        sharedRoutesReturned: nodeSharedRoutes.length,
+        minimumSharedRouteSeparationNm: minimumPairwiseSeparationNm(nodeSharedRoutes),
+        sharedRouteSeparationFromPrimaryNm: nodeSharedRoutes
+          .slice(1)
+          .map((route) => averageRouteSeparationNm(nodeSharedRoutes[0], route)),
         rustEndToEnd: rustBatch,
         p50Speedup: nodeBatch.p50Ms / rustBatch.p50Ms,
+        p50SharedSearchSpeedup: nodeBatch.p50Ms / nodeShared.p50Ms,
       });
     }
     const report = {

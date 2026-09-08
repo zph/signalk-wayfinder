@@ -261,6 +261,37 @@ test('calculate: arrives when destination is within arrival radius', async () =>
   );
 });
 
+test('calculate: one search returns distinct arrival paths for route alternatives', async () => {
+  const times = hourlyTimes('2024-01-01T00:00:00Z', 5);
+  const request: CalculationRequest = {
+    start: { lat: 41, lon: 11 },
+    end: { lat: 41.12, lon: 11 },
+    departureTime: times[0].toISOString(),
+  };
+  const result = await algo.calculate(makeWind(makeGrib(times)), null, makePolar(), null, null, request, () => {}, {
+    arrivalRadiusNm: 5,
+    sharedAlternativeCount: 5,
+  });
+
+  assert.ok(result.alternatives);
+  assert.ok(result.alternatives.length > 1);
+  assert.ok(result.alternatives.length <= 5);
+  assert.deepEqual(result.alternatives[0], result.route);
+  assert.equal(
+    new Set(
+      result.alternatives.map((route) =>
+        route.map((point) => `${point.lat.toFixed(6)},${point.lon.toFixed(6)}`).join(';'),
+      ),
+    ).size,
+    result.alternatives.length,
+  );
+  assert.ok(
+    result.alternatives.every(
+      (route) => route.at(-1)?.lat === request.end.lat && route.at(-1)?.lon === request.end.lon,
+    ),
+  );
+});
+
 test('calculate: every RoutePoint has a non-negative legCalcMs; start point is 0', async () => {
   const wind = makeWind(makeGrib());
   const polar = makePolar();

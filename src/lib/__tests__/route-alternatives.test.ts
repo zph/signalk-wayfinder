@@ -3,7 +3,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { RoutePoint, RouteQualityReport } from '../../types';
-import { optionsForAlternative, rankDistinctAlternatives, type RouteAlternative } from '../route-alternatives';
+import {
+  optionsForAlternative,
+  planAlternativeSearch,
+  rankDistinctAlternatives,
+  type RouteAlternative,
+} from '../route-alternatives';
 
 function route(lon: number, durationHours: number): RoutePoint[] {
   return [
@@ -77,6 +82,18 @@ test('configures objective-specific propulsion and distinct heading offsets', ()
     forceMotor: true,
     motorBelowKn: 0,
   });
+});
+
+test('plans one shared search for direct alternatives and preserves repeated fallback', () => {
+  const shared = planAlternativeSearch({ headingStep: 5 }, 'fastest', 10, true);
+  assert.equal(shared.shared, true);
+  assert.equal(shared.tasks.length, 1);
+  assert.equal(shared.tasks[0].options.sharedAlternativeCount, 10);
+
+  const repeated = planAlternativeSearch({ headingStep: 5 }, 'fastest', 5, false);
+  assert.equal(repeated.shared, false);
+  assert.equal(repeated.tasks.length, 10);
+  assert.equal(repeated.tasks[1].options.headingOffsetDeg, 0.5);
 });
 
 test('fastest ranks complete routes by duration and removes duplicate geometry', () => {

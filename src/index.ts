@@ -62,7 +62,7 @@ import { assessRouteQuality, routeQualityWarning } from './lib/route-quality';
 import { loadGdalBathymetry } from './lib/gdal-bathymetry';
 import { navigationConstraintViolation, type NavigationConstraints } from './lib/navigation-safety';
 import {
-  optionsForAlternative,
+  planAlternativeSearch,
   rankDistinctAlternatives,
   ROUTING_OBJECTIVES,
   type RouteAlternative,
@@ -72,6 +72,7 @@ import { routeUnderwayBudget } from './lib/passage-constraints';
 import {
   resolveAlternativeWorkerCount,
   runAlternativeAttempts,
+  expandSharedAlternativeOutcomes,
   type AlternativeAttemptOutcome,
 } from './lib/routing/alternative-worker-runner';
 import type { AlternativeWorkerInitialization } from './lib/routing/alternative-worker-protocol';
@@ -840,15 +841,14 @@ module.exports = (app: SignalKApp) => {
           if (objective === 'allMotoring' && !(Number(mergedOptions.motorSpeedKn) > 0)) {
             throw new Error('All-motoring routes require an engine cruising speed greater than 0 knots');
           }
-          const attemptCount = requestedCount === 1 ? 1 : Math.min(20, requestedCount * 2);
+          const searchPlan = planAlternativeSearch(mergedOptions, objective, requestedCount, points.length === 2);
+          const useSharedAlternatives = searchPlan.shared;
+          const attemptCount = searchPlan.tasks.length;
           const candidates: RouteAlternative[] = [];
           let lastCandidateError: Error | undefined;
           const needsShorelineIndex =
             navigationConstraints.minimumShoreDistanceNm > 0 || navigationConstraints.maximumOffshoreDistanceNm > 0;
-          const tasks = Array.from({ length: attemptCount }, (_, attempt) => ({
-            attempt,
-            options: optionsForAlternative(mergedOptions, objective, attempt, requestedCount),
-          }));
+          const tasks = searchPlan.tasks;
           let outcomes: AlternativeAttemptOutcome[];
 
           // gdal-async is not worker-isolate compatible. Numeric bathymetry therefore keeps the
@@ -861,6 +861,7 @@ module.exports = (app: SignalKApp) => {
             for (const task of tasks) {
               try {
                 const fullRoute: RoutePoint[] = [];
+                let sharedRoutes: RoutePoint[][] | undefined;
                 const warnings: string[] = [];
                 let continuationOptions = task.options;
                 for (let leg = 0; leg < points.length - 1; leg++) {
@@ -887,6 +888,7 @@ module.exports = (app: SignalKApp) => {
                     { shorelineIndex, depthProvider },
                   );
                   if (result.warning) warnings.push(`Leg ${leg + 1}: ${result.warning}`);
+                  if (points.length === 2 && result.alternatives) sharedRoutes = result.alternatives;
                   fullRoute.push(...(leg === 0 ? result.route : result.route.slice(1)));
                   const passageDeparture = fullRoute[0].time;
                   const passageBudget = routeUnderwayBudget(
@@ -906,6 +908,7 @@ module.exports = (app: SignalKApp) => {
                 outcomes.push({
                   attempt: task.attempt,
                   route: fullRoute,
+                  ...(sharedRoutes ? { routes: sharedRoutes } : {}),
                   ...(warnings.length > 0 ? { warning: warnings.join('; ') } : {}),
                 });
               } catch (error) {
@@ -953,13 +956,17 @@ module.exports = (app: SignalKApp) => {
             });
           }
 
+          if (useSharedAlternatives) {
+            outcomes = expandSharedAlternativeOutcomes(outcomes);
+          }
+
           if (sequence !== calculationSequence) return;
           for (const outcome of outcomes) {
             if (outcome.error || !outcome.route) {
               lastCandidateError = outcome.error ?? new Error(`Route attempt ${outcome.attempt + 1} returned no route`);
               continue;
             }
-            const runOptions = tasks[outcome.attempt].options;
+            const runOptions = tasks[useSharedAlternatives ? 0 : outcome.attempt].options;
             try {
               const quality = assessRouteQuality(outcome.route, {
                 start,

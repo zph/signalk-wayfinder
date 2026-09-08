@@ -43,6 +43,7 @@ const FINE_PASS_CONE_HALF_ANGLE = 100;
 // all directional constraint and causing excessive wandering (BUG-53).
 const CONE_DISABLE_LOOKAHEAD_NM = 100;
 const MAX_HEADING_CHANGE = 120;
+const MIN_SHARED_ALTERNATIVE_SEPARATION_NM = 0.25;
 
 interface StepTiming {
   step: number;
@@ -120,7 +121,7 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
     onProgress: (pct: number, frontier: Array<[number, number]>) => void,
     options?: Record<string, unknown>,
     navigationSafety?: NavigationSafetyContext,
-  ): Promise<{ route: RoutePoint[]; warning?: string }> {
+  ): Promise<{ route: RoutePoint[]; warning?: string; alternatives?: RoutePoint[][] }> {
     const headingStep = Number(options?.headingStep ?? DEFAULT_HEADING_STEP);
     const sectorSize = Number(options?.sectorSize ?? DEFAULT_SECTOR_SIZE);
     const minBoatSpeed = Number(options?.minBoatSpeed ?? DEFAULT_MIN_BOAT_SPEED);
@@ -138,6 +139,7 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
     const configuredConeHalfAngle = Number(options?.coneHalfAngle ?? FINE_PASS_CONE_HALF_ANGLE);
     const coneDisableLookaheadNm = Number(options?.coneDisableLookaheadNm ?? CONE_DISABLE_LOOKAHEAD_NM);
     const maxHeadingChangeDeg = Number(options?.maxHeadingChange ?? MAX_HEADING_CHANGE);
+    const sharedAlternativeCount = Math.max(1, Math.min(10, Math.trunc(Number(options?.sharedAlternativeCount ?? 1))));
     const navigationConstraints: NavigationConstraints = {
       minimumDepthM: Number(options?.minimumDepthM ?? 0),
       minimumShoreDistanceNm: Number(options?.minimumShoreDistanceNm ?? 0),
@@ -189,6 +191,8 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
     ];
 
     let arrived: IsochronePoint | null = null;
+    const arrivedCandidates: IsochronePoint[] = [];
+    let firstArrivalStep: number | null = null;
 
     const stepTimings: StepTiming[] = [];
     let stepsCompleted = 0;
@@ -435,10 +439,14 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
               finalBudget.allowed &&
               (!daylightOnly || isLegInDaylight(nextTime, finalArrivalTime, { lat: newLat, lon: newLon }, end)) &&
               !arrivalBlockedByLand &&
-              !arrivalSafetyViolation &&
-              (!arrived || distToEnd < haversineNM(arrived.lat, arrived.lon, end.lat, end.lon))
+              !arrivalSafetyViolation
             ) {
-              arrived = newPoint;
+              if (sharedAlternativeCount > 1) arrivedCandidates.push(newPoint);
+              if (
+                firstArrivalStep === null &&
+                (!arrived || distToEnd < haversineNM(arrived.lat, arrived.lon, end.lat, end.lon))
+              )
+                arrived = newPoint;
             }
           }
         }
@@ -451,7 +459,14 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
       const stepCalcMs = performance.now() - stepStart;
       for (const c of candidates) c.stepCalcMs = Math.round(stepCalcMs);
 
-      if (arrived) break;
+      if (arrived) {
+        if (sharedAlternativeCount === 1) break;
+        if (firstArrivalStep === null) firstArrivalStep = step;
+        // Later arrivals are often the routes that pass an obstruction on a different side.
+        // Keep expanding briefly after the fastest arrival instead of returning variants that
+        // differ only in their final approach to the same path.
+        if (step - firstArrivalStep >= 6) break;
+      }
 
       lastRejectedByLand = rejectedByLand;
       lastRejectedByPolar = rejectedByPolar;
@@ -538,8 +553,69 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
       );
     }
 
-    return { route: backtrack(arrived, wind, true, end) };
+    const route = backtrack(arrived, wind, true, end);
+    if (sharedAlternativeCount === 1) return { route };
+    return {
+      route,
+      alternatives: collectDistinctArrivalRoutes(route, arrivedCandidates, sharedAlternativeCount, wind, end),
+    };
   }
+}
+
+function routeGeometryKey(route: RoutePoint[]): string {
+  return route.map((point) => `${point.lat.toFixed(6)},${point.lon.toFixed(6)}`).join(';');
+}
+
+function collectDistinctArrivalRoutes(
+  primary: RoutePoint[],
+  arrivals: IsochronePoint[],
+  requestedCount: number,
+  wind: WindProvider,
+  end: { lat: number; lon: number },
+): RoutePoint[][] {
+  const routes = [primary];
+  const seen = new Set([routeGeometryKey(primary)]);
+  const candidates = arrivals
+    .map((arrival) => ({
+      route: backtrack(arrival, wind, true, end),
+      arrivalTimeMs:
+        arrival.time.getTime() +
+        (haversineNM(arrival.lat, arrival.lon, end.lat, end.lon) / (arrival.boatSpeed ?? 1)) * 3_600_000,
+    }))
+    .sort((a, b) => a.arrivalTimeMs - b.arrivalTimeMs)
+    .slice(0, 2_000)
+    .filter(({ route }) => {
+      const key = routeGeometryKey(route);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  while (routes.length < requestedCount && candidates.length > 0) {
+    let bestIndex = 0;
+    let bestSeparation = -1;
+    for (let index = 0; index < candidates.length; index++) {
+      const separation = Math.min(...routes.map((selected) => routeSeparationNm(selected, candidates[index].route)));
+      if (separation > bestSeparation) {
+        bestIndex = index;
+        bestSeparation = separation;
+      }
+    }
+    if (bestSeparation < MIN_SHARED_ALTERNATIVE_SEPARATION_NM) break;
+    routes.push(candidates.splice(bestIndex, 1)[0].route);
+  }
+  return routes;
+}
+
+function routeSeparationNm(a: RoutePoint[], b: RoutePoint[]): number {
+  const samples = Math.min(12, Math.max(2, Math.min(a.length, b.length)));
+  let total = 0;
+  for (let sample = 1; sample < samples - 1; sample++) {
+    const fraction = sample / (samples - 1);
+    const pointA = a[Math.round(fraction * (a.length - 1))];
+    const pointB = b[Math.round(fraction * (b.length - 1))];
+    total += haversineNM(pointA.lat, pointA.lon, pointB.lat, pointB.lon);
+  }
+  return total / Math.max(1, samples - 2);
 }
 
 // Farthest-from-start dominance: within each bearing sector keep the two candidates
