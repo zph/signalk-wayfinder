@@ -4,6 +4,22 @@ import { LandPolygon, LandIndex, LandEdgeIndex } from '../types';
 
 const EDGE_CELL_DEG = 0.1;
 
+interface CompiledLandEdges {
+  cellEdges: Map<number, Uint32Array>;
+  lon1: Float64Array;
+  lat1: Float64Array;
+  lon2: Float64Array;
+  lat2: Float64Array;
+  multiCell: Uint8Array;
+  seenGeneration: Uint32Array;
+  generation: number;
+}
+
+// Keep the bundled/on-wire index backwards compatible. Each process compiles its own
+// cache once, replacing polygon/ring object chasing in the routing hot path with edge IDs
+// and contiguous numeric arrays.
+const compiledEdgeIndexes = new WeakMap<LandEdgeIndex, CompiledLandEdges>();
+
 function edgeCellKey(latCell: number, lonCell: number): number {
   // At 0.1° resolution, lat cells span −900..+900 and lon cells span −1800..+1800;
   // formula produces a unique non-negative integer key for each (lat, lon) cell pair.
@@ -110,7 +126,87 @@ export function buildLandEdgeIndex(polygons: LandPolygon[]): LandEdgeIndex {
     edgeGrid.set(key, new Uint32Array(arr));
   }
 
-  return { polygons, edgeGrid, polyGrid };
+  const index = { polygons, edgeGrid, polyGrid };
+  prepareLandEdgeIndex(index);
+  return index;
+}
+
+export function prepareLandEdgeIndex(index: LandEdgeIndex): void {
+  if (compiledEdgeIndexes.has(index)) return;
+
+  const ringEdgeBases: number[][] = [];
+  let edgeCount = 0;
+  for (const polygon of index.polygons) {
+    const bases: number[] = [];
+    for (const ring of [polygon.exterior, ...(polygon.interiors ?? [])]) {
+      bases.push(edgeCount);
+      edgeCount += ring.length >> 1;
+    }
+    ringEdgeBases.push(bases);
+  }
+
+  const lon1 = new Float64Array(edgeCount);
+  const lat1 = new Float64Array(edgeCount);
+  const lon2 = new Float64Array(edgeCount);
+  const lat2 = new Float64Array(edgeCount);
+  const multiCell = new Uint8Array(edgeCount);
+
+  for (let pi = 0; pi < index.polygons.length; pi++) {
+    const polygon = index.polygons[pi];
+    const rings = [polygon.exterior, ...(polygon.interiors ?? [])];
+    for (let ri = 0; ri < rings.length; ri++) {
+      const ring = rings[ri];
+      const count = ring.length >> 1;
+      const base = ringEdgeBases[pi][ri];
+      for (let ei = 0; ei < count; ei++) {
+        const edgeId = base + ei;
+        const next = ei + 1 < count ? ei + 1 : 0;
+        const x1 = ring[ei * 2];
+        const y1 = ring[ei * 2 + 1];
+        const x2 = ring[next * 2];
+        const y2 = ring[next * 2 + 1];
+        lon1[edgeId] = x1;
+        lat1[edgeId] = y1;
+        lon2[edgeId] = x2;
+        lat2[edgeId] = y2;
+        multiCell[edgeId] = Math.abs(x2 - x1) >= EDGE_CELL_DEG || Math.abs(y2 - y1) >= EDGE_CELL_DEG ? 1 : 0;
+      }
+    }
+  }
+
+  const cellEdges = new Map<number, Uint32Array>();
+  for (const [key, triples] of index.edgeGrid) {
+    const ids = new Uint32Array(triples.length / 3);
+    for (let source = 0, target = 0; source < triples.length; source += 3, target++) {
+      ids[target] = ringEdgeBases[triples[source]][triples[source + 1]] + triples[source + 2];
+    }
+    cellEdges.set(key, ids);
+  }
+
+  compiledEdgeIndexes.set(index, {
+    cellEdges,
+    lon1,
+    lat1,
+    lon2,
+    lat2,
+    multiCell,
+    seenGeneration: new Uint32Array(edgeCount),
+    generation: 0,
+  });
+}
+
+function compiledEdges(index: LandEdgeIndex): CompiledLandEdges {
+  prepareLandEdgeIndex(index);
+  return compiledEdgeIndexes.get(index)!;
+}
+
+function nextGeneration(compiled: CompiledLandEdges): number {
+  compiled.generation = (compiled.generation + 1) >>> 0;
+  if (compiled.generation === 0) {
+    compiled.seenGeneration.fill(0);
+    compiled.generation = 1;
+  }
+  return compiled.generation;
 }
 
 // Checks whether the segment crosses any polygon edge in the index.
@@ -118,6 +214,34 @@ export function buildLandEdgeIndex(polygons: LandPolygon[]): LandEdgeIndex {
 // Allocation-free on the hot path; safe to call per candidate in the isochrone loop.
 export function segmentCrossesLandFast(
   index: LandEdgeIndex,
+  lat1: number,
+  lon1: number,
+  lat2: number,
+  lon2: number,
+): boolean {
+  return segmentCrossesCompiled(compiledEdges(index), lat1, lon1, lat2, lon2);
+}
+
+// Tests a same-origin group of candidate legs into a caller-owned result buffer.
+// The router reuses its coordinate and result arrays for every frontier point, so this
+// introduces no per-candidate objects and resolves the compiled shoreline index once.
+export function segmentCrossesLandBatch(
+  index: LandEdgeIndex,
+  lat1: number,
+  lon1: number,
+  lat2: Float64Array,
+  lon2: Float64Array,
+  count: number,
+  blocked: Uint8Array,
+): void {
+  const compiled = compiledEdges(index);
+  for (let candidate = 0; candidate < count; candidate++) {
+    blocked[candidate] = segmentCrossesCompiled(compiled, lat1, lon1, lat2[candidate], lon2[candidate]) ? 1 : 0;
+  }
+}
+
+function segmentCrossesCompiled(
+  compiled: CompiledLandEdges,
   lat1: number,
   lon1: number,
   lat2: number,
@@ -145,20 +269,40 @@ export function segmentCrossesLandFast(
   else tMLon = Infinity;
 
   const maxCells = Math.abs(latEnd - latCell) + Math.abs(lonEnd - lonCell) + 1; // Manhattan distance + 1 to include the starting cell
+  const generation = nextGeneration(compiled);
+  const segmentLonMin = Math.min(lon1, lon2);
+  const segmentLonMax = Math.max(lon1, lon2);
+  const segmentLatMin = Math.min(lat1, lat2);
+  const segmentLatMax = Math.max(lat1, lat2);
 
   for (let step = 0; step < maxCells; step++) {
-    const entries = index.edgeGrid.get(edgeCellKey(latCell, lonCell));
+    const entries = compiled.cellEdges.get(edgeCellKey(latCell, lonCell));
     if (entries) {
-      for (let i = 0; i < entries.length; i += 3) {
-        const pi = entries[i];
-        const ri = entries[i + 1];
-        const ei = entries[i + 2];
-        const polygon = index.polygons[pi];
-        const ring = ri === 0 ? polygon.exterior : polygon.interiors?.[ri - 1];
-        if (!ring) continue;
-        const nv = ring.length >> 1;
-        const ni = ei + 1 < nv ? ei + 1 : 0;
-        if (segmentsIntersect(lon1, lat1, lon2, lat2, ring[ei * 2], ring[ei * 2 + 1], ring[ni * 2], ring[ni * 2 + 1]))
+      for (let i = 0; i < entries.length; i++) {
+        const edgeId = entries[i];
+        if (compiled.multiCell[edgeId] !== 0) {
+          if (compiled.seenGeneration[edgeId] === generation) continue;
+          compiled.seenGeneration[edgeId] = generation;
+          if (
+            Math.max(compiled.lon1[edgeId], compiled.lon2[edgeId]) < segmentLonMin ||
+            Math.min(compiled.lon1[edgeId], compiled.lon2[edgeId]) > segmentLonMax ||
+            Math.max(compiled.lat1[edgeId], compiled.lat2[edgeId]) < segmentLatMin ||
+            Math.min(compiled.lat1[edgeId], compiled.lat2[edgeId]) > segmentLatMax
+          )
+            continue;
+        }
+        if (
+          segmentsIntersect(
+            lon1,
+            lat1,
+            lon2,
+            lat2,
+            compiled.lon1[edgeId],
+            compiled.lat1[edgeId],
+            compiled.lon2[edgeId],
+            compiled.lat2[edgeId],
+          )
+        )
           return true;
       }
     }

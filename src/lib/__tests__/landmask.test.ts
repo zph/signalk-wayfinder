@@ -5,6 +5,7 @@ import {
   segmentCrossesLand,
   polygonsInBbox,
   buildLandEdgeIndex,
+  segmentCrossesLandBatch,
   segmentCrossesLandFast,
   isPointOnLand,
 } from '../landmask';
@@ -101,6 +102,19 @@ test('segmentCrossesLandFast: far from polygon → false', () => {
 test('segmentCrossesLandFast: segment entirely inside polygon → false (no edge crossing)', () => {
   // both endpoints inside; no polygon edges in the path cells → edge check returns false
   assert.ok(!segmentCrossesLandFast(edgeIdx, 2, 1.5, 2, 2.5));
+});
+
+test('segmentCrossesLandBatch: same-origin candidates match scalar checks', () => {
+  const lat = new Float64Array([2, 0, -9, 2]);
+  const lon = new Float64Array([2, 5, -9, 2.5]);
+  const blocked = new Uint8Array(lat.length);
+  segmentCrossesLandBatch(edgeIdx, 0, 0, lat, lon, lat.length, blocked);
+  assert.deepEqual(
+    [...blocked],
+    [...lat].map((candidateLat, candidate) =>
+      segmentCrossesLandFast(edgeIdx, 0, 0, candidateLat, lon[candidate]) ? 1 : 0,
+    ),
+  );
 });
 
 test('isPointOnLand: point inside polygon → true', () => {

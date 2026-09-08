@@ -365,6 +365,47 @@ test('calculate: coarse-to-fine falls back when the coarse heading lattice misse
   assert.equal(result.route.at(-1)?.lon, request.end.lon);
 });
 
+test('calculate: multiple coarse corridors preserve obstacle routing quality', async () => {
+  const times = hourlyTimes('2024-01-01T00:00:00Z', 37);
+  const request: CalculationRequest = {
+    start: { lat: 40, lon: 10 },
+    end: { lat: 42, lon: 12 },
+    departureTime: times[0].toISOString(),
+  };
+  const obstacle = buildLandEdgeIndex([
+    {
+      bboxLatMin: 40.8,
+      bboxLatMax: 41.2,
+      bboxLonMin: 10.8,
+      bboxLonMax: 11.2,
+      exterior: new Float64Array([10.8, 40.8, 11.2, 40.8, 11.2, 41.2, 10.8, 41.2]),
+    },
+  ]);
+  const sharedOptions = {
+    arrivalRadiusNm: 1,
+    headingStep: 2,
+    sectorSize: 0.5,
+    coneHalfAngle: 100,
+    coneDisableLookaheadNm: 100,
+    sharedAlternativeCount: 10,
+    coarseToFine: true,
+  };
+  const wind = makeWind(makeGrib(times));
+  const single = await algo.calculate(wind, null, makePolar(), obstacle, null, request, () => {}, {
+    ...sharedOptions,
+    coarseCorridorCount: 1,
+  });
+  const multiple = await algo.calculate(wind, null, makePolar(), obstacle, null, request, () => {}, {
+    ...sharedOptions,
+    coarseCorridorCount: 4,
+  });
+
+  assert.equal(multiple.route.at(-1)?.lat, request.end.lat);
+  assert.equal(multiple.route.at(-1)?.lon, request.end.lon);
+  assert.ok((multiple.alternatives?.length ?? 1) >= (single.alternatives?.length ?? 1));
+  assert.ok(Math.abs(multiple.route.at(-1)!.time.getTime() - single.route.at(-1)!.time.getTime()) <= 3_600_000);
+});
+
 test('calculate: every RoutePoint has a non-negative legCalcMs; start point is 0', async () => {
   const wind = makeWind(makeGrib());
   const polar = makePolar();

@@ -34,6 +34,7 @@
     "prepare-land-data": "python3 scripts/prepare-land-data.py",
     "build-hires-land-data:podman": "bash scripts/build-hires-land-data-podman.sh",
     "test": "tsx --test 'src/lib/__tests__/**/*.test.ts'",
+    "benchmark:node-routing": "tsx scripts/benchmark-node-routing.ts",
     "test:arm64": "bash scripts/test-arm64.sh",
     "lint": "eslint src/",
     "format": "prettier --write src/ public/index.html",
