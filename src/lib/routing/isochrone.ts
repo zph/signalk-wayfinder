@@ -59,21 +59,18 @@ interface RoutingCorridorPoint extends LatLon {
   timeMs: number;
 }
 
-interface FrontierEntry<T> {
-  point: T;
-  distSq: number;
-}
-
-interface FrontierPlacement {
-  sector: number;
-  distSq: number;
-  index: number;
-}
-
 class FrontierAccumulator<T extends { lat: number; lon: number }> {
-  readonly sectors = new Map<number, FrontierEntry<T>[]>();
   candidateCount = 0;
   private readonly longitudeScale: number;
+  private readonly counts: Uint8Array;
+  private readonly firstDistances: Float64Array;
+  private readonly secondDistances: Float64Array;
+  private readonly firstPoints: Array<T | undefined>;
+  private readonly secondPoints: Array<T | undefined>;
+  private readonly activeSectors: number[] = [];
+  private pendingSector = -1;
+  private pendingIndex = -1;
+  private pendingDistance = 0;
 
   constructor(
     private readonly startLat: number,
@@ -82,9 +79,15 @@ class FrontierAccumulator<T extends { lat: number; lon: number }> {
     private readonly lanes = 1,
   ) {
     this.longitudeScale = Math.cos(startLat * DEG_TO_RAD);
+    const sectorCount = Math.ceil(360 / sectorSize) * lanes;
+    this.counts = new Uint8Array(sectorCount);
+    this.firstDistances = new Float64Array(sectorCount);
+    this.secondDistances = new Float64Array(sectorCount);
+    this.firstPoints = new Array<T | undefined>(sectorCount);
+    this.secondPoints = new Array<T | undefined>(sectorCount);
   }
 
-  consider(lat: number, lon: number, lane = 0): FrontierPlacement | null {
+  consider(lat: number, lon: number, lane = 0): boolean {
     this.candidateCount++;
     const brng = bearingTo(this.startLat, this.startLon, lat, lon);
     const bearingSector = Math.floor((((brng % 360) + 360) % 360) / this.sectorSize);
@@ -92,28 +95,42 @@ class FrontierAccumulator<T extends { lat: number; lon: number }> {
     const dLat = lat - this.startLat;
     const dLon = (lon - this.startLon) * this.longitudeScale;
     const distSq = dLat * dLat + dLon * dLon;
-    const existing = this.sectors.get(sector);
-    if (!existing) return { sector, distSq, index: 0 };
-    if (existing.length < 2) return { sector, distSq, index: existing.length };
-    const minIndex = existing[0].distSq <= existing[1].distSq ? 0 : 1;
-    return distSq > existing[minIndex].distSq ? { sector, distSq, index: minIndex } : null;
+    const count = this.counts[sector];
+    const index = count < 2 ? count : this.firstDistances[sector] <= this.secondDistances[sector] ? 0 : 1;
+    const accepted = count < 2 || distSq > (index === 0 ? this.firstDistances[sector] : this.secondDistances[sector]);
+    if (!accepted) return false;
+    this.pendingSector = sector;
+    this.pendingIndex = index;
+    this.pendingDistance = distSq;
+    return true;
   }
 
-  commit(point: T, placement: FrontierPlacement): void {
-    const entry = { point, distSq: placement.distSq };
-    const existing = this.sectors.get(placement.sector);
-    if (!existing) this.sectors.set(placement.sector, [entry]);
-    else if (placement.index === existing.length) existing.push(entry);
-    else existing[placement.index] = entry;
+  commit(point: T): void {
+    const sector = this.pendingSector;
+    if (this.pendingIndex === 0) {
+      this.firstPoints[sector] = point;
+      this.firstDistances[sector] = this.pendingDistance;
+    } else {
+      this.secondPoints[sector] = point;
+      this.secondDistances[sector] = this.pendingDistance;
+    }
+    if (this.counts[sector] < 2) {
+      if (this.counts[sector] === 0) this.activeSectors.push(sector);
+      this.counts[sector]++;
+    }
   }
 
   add(point: T): void {
-    const placement = this.consider(point.lat, point.lon);
-    if (placement) this.commit(point, placement);
+    if (this.consider(point.lat, point.lon)) this.commit(point);
   }
 
   frontier(): T[] {
-    return [...this.sectors.values()].flatMap((entries) => entries.map(({ point }) => point));
+    const result: T[] = [];
+    for (const sector of this.activeSectors) {
+      result.push(this.firstPoints[sector]!);
+      if (this.counts[sector] === 2) result.push(this.secondPoints[sector]!);
+    }
+    return result;
   }
 }
 
@@ -353,6 +370,10 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
     const sectorSize = Number(options?.sectorSize ?? DEFAULT_SECTOR_SIZE);
     const minBoatSpeed = Number(options?.minBoatSpeed ?? DEFAULT_MIN_BOAT_SPEED);
     const arrivalRadiusNm = Number(options?.arrivalRadiusNm ?? DEFAULT_ARRIVAL_RADIUS_NM);
+    // Great-circle distance is always at least the north/south meridian distance.
+    // A deliberately loose 59 nm/degree bound avoids a haversine call for candidates
+    // that cannot possibly be inside the arrival circle.
+    const arrivalLatitudeTolerance = arrivalRadiusNm / 59;
     const maxWindKn = Number(options?.maxWindKn ?? 0); // 0 = no limit
     const maxWaveM = Number(options?.maxWaveM ?? 0); // 0 = no limit
     const motorSpeedKn = Number(options?.motorSpeedKn ?? 0); // 0 = no motor
@@ -810,14 +831,15 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
           }
 
           phaseStarted = profiling ? phaseProfiler.mark() : 0;
-          const distToEnd = haversineNM(newLat, newLon, end.lat, end.lon);
-          if (profiling) phaseProfiler.record('candidateAndArrival', phaseStarted);
-          phaseStarted = profiling ? phaseProfiler.mark() : 0;
-          const frontierPlacement = frontierAccumulator.consider(newLat, newLon, pendingCorridorLane[candidateIndex]);
+          const frontierAccepted = frontierAccumulator.consider(newLat, newLon, pendingCorridorLane[candidateIndex]);
           if (profiling) phaseProfiler.record('prune', phaseStarted);
-          const isArrivalCandidate = distToEnd <= arrivalRadiusNm;
+          phaseStarted = profiling ? phaseProfiler.mark() : 0;
+          const couldBeArrival = Math.abs(newLat - end.lat) <= arrivalLatitudeTolerance;
+          const distToEnd = couldBeArrival ? haversineNM(newLat, newLon, end.lat, end.lon) : Infinity;
+          const isArrivalCandidate = couldBeArrival && distToEnd <= arrivalRadiusNm;
+          if (profiling) phaseProfiler.record('candidateAndArrival', phaseStarted);
           if (isArrivalCandidate && profiling) phaseProfiler.increment('arrivalCandidates');
-          if (!frontierPlacement && !isArrivalCandidate) continue;
+          if (!frontierAccepted && !isArrivalCandidate) continue;
           phaseStarted = profiling ? phaseProfiler.mark() : 0;
           const newPoint: IsochronePoint = {
             lat: newLat,
@@ -835,7 +857,7 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
             gribFilePath,
             parent: point,
           };
-          if (frontierPlacement) frontierAccumulator.commit(newPoint, frontierPlacement);
+          if (frontierAccepted) frontierAccumulator.commit(newPoint);
           if (profiling) phaseProfiler.increment('acceptedCandidates');
           if (profiling) phaseProfiler.record('candidateAndArrival', phaseStarted);
           if (isArrivalCandidate) {
@@ -1034,8 +1056,20 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
   }
 }
 
-function routeGeometryKey(route: RoutePoint[]): string {
+function routeGeometryKey(route: readonly LatLon[]): string {
   return route.map((point) => `${point.lat.toFixed(6)},${point.lon.toFixed(6)}`).join(';');
+}
+
+function arrivalGeometry(arrival: IsochronePoint, end: LatLon): LatLon[] {
+  const geometry: LatLon[] = [];
+  let current: IsochronePoint | undefined = arrival;
+  while (current) {
+    geometry.push(current);
+    current = current.parent;
+  }
+  geometry.reverse();
+  geometry.push(end);
+  return geometry;
 }
 
 function collectDistinctArrivalRoutes(
@@ -1046,18 +1080,20 @@ function collectDistinctArrivalRoutes(
   end: { lat: number; lon: number },
 ): RoutePoint[][] {
   const routes = [primary];
+  const selectedGeometries: LatLon[][] = [primary];
   const seen = new Set([routeGeometryKey(primary)]);
   const candidates = arrivals
     .map((arrival) => ({
-      route: backtrack(arrival, wind, true, end),
+      arrival,
       arrivalTimeMs:
         arrival.time.getTime() +
         (haversineNM(arrival.lat, arrival.lon, end.lat, end.lon) / (arrival.boatSpeed ?? 1)) * 3_600_000,
     }))
     .sort((a, b) => a.arrivalTimeMs - b.arrivalTimeMs)
     .slice(0, 2_000)
-    .filter(({ route }) => {
-      const key = routeGeometryKey(route);
+    .map((candidate) => ({ ...candidate, geometry: arrivalGeometry(candidate.arrival, end) }))
+    .filter(({ geometry }) => {
+      const key = routeGeometryKey(geometry);
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
@@ -1066,19 +1102,23 @@ function collectDistinctArrivalRoutes(
     let bestIndex = 0;
     let bestSeparation = -1;
     for (let index = 0; index < candidates.length; index++) {
-      const separation = Math.min(...routes.map((selected) => routeSeparationNm(selected, candidates[index].route)));
+      const separation = Math.min(
+        ...selectedGeometries.map((selected) => routeSeparationNm(selected, candidates[index].geometry)),
+      );
       if (separation > bestSeparation) {
         bestIndex = index;
         bestSeparation = separation;
       }
     }
     if (bestSeparation < MIN_SHARED_ALTERNATIVE_SEPARATION_NM) break;
-    routes.push(candidates.splice(bestIndex, 1)[0].route);
+    const selected = candidates.splice(bestIndex, 1)[0];
+    selectedGeometries.push(selected.geometry);
+    routes.push(backtrack(selected.arrival, wind, true, end));
   }
   return routes;
 }
 
-function routeSeparationNm(a: RoutePoint[], b: RoutePoint[]): number {
+function routeSeparationNm(a: readonly LatLon[], b: readonly LatLon[]): number {
   const samples = Math.min(12, Math.max(2, Math.min(a.length, b.length)));
   let total = 0;
   for (let sample = 1; sample < samples - 1; sample++) {

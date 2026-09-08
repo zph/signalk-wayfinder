@@ -150,6 +150,39 @@ async function benchmarkRouteMode(extra: Record<string, unknown>): Promise<{
   };
 }
 
+async function calculateHighArrival(): Promise<RoutePoint[][]> {
+  const result = await new IsochroneAlgorithm().calculate(
+    wind,
+    null,
+    polar,
+    null,
+    null,
+    {
+      start: { lat: 40, lon: 10 },
+      end: { lat: 40.12, lon: 10 },
+      departureTime: times[0].toISOString(),
+    },
+    () => {},
+    { arrivalRadiusNm: 5, headingStep: 5, sectorSize: 1, sharedAlternativeCount: 5 },
+  );
+  return result.alternatives ?? [result.route];
+}
+
+async function benchmarkHighArrival(): Promise<{
+  timing: ReturnType<typeof metrics>;
+  routesReturned: number;
+}> {
+  for (let index = 0; index < warmups; index++) await calculateHighArrival();
+  const samples: number[] = [];
+  let routes: RoutePoint[][] = [];
+  for (let index = 0; index < iterations; index++) {
+    const started = performance.now();
+    routes = await calculateHighArrival();
+    samples.push(performance.now() - started);
+  }
+  return { timing: metrics(samples), routesReturned: routes.length };
+}
+
 function edgeCellKey(latCell: number, lonCell: number): number {
   return (latCell + 900) * 3600 + (((lonCell % 3600) + 3600) % 3600);
 }
@@ -255,11 +288,12 @@ function benchmarkShoreline(): {
 
 async function main(): Promise<void> {
   const shoreline = benchmarkShoreline();
+  const highArrival = await benchmarkHighArrival();
   const exact = await benchmarkRouteMode({ coarseToFine: false, speculativeHeadingStride: 1 });
   const singleCorridor = await benchmarkRouteMode({ coarseToFine: true, coarseCorridorCount: 1 });
   const multipleCorridors = await benchmarkRouteMode({ coarseToFine: true, coarseCorridorCount: 4 });
   process.stdout.write(
-    `${JSON.stringify({ iterations, warmups, fixture: '375 nm, 81x81x97 wind grid, blocking island, 10 alternatives', shoreline, exact, singleCorridor, multipleCorridors, p50MultiVsExactSpeedup: exact.timing.p50Ms / multipleCorridors.timing.p50Ms, p50MultiVsSingleRatio: singleCorridor.timing.p50Ms / multipleCorridors.timing.p50Ms }, null, 2)}\n`,
+    `${JSON.stringify({ iterations, warmups, fixture: '375 nm, 81x81x97 wind grid, blocking island, 10 alternatives', shoreline, highArrival, exact, singleCorridor, multipleCorridors, p50MultiVsExactSpeedup: exact.timing.p50Ms / multipleCorridors.timing.p50Ms, p50MultiVsSingleRatio: singleCorridor.timing.p50Ms / multipleCorridors.timing.p50Ms }, null, 2)}\n`,
   );
 }
 

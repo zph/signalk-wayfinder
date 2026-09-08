@@ -67,3 +67,27 @@ next large gain.
 These figures are diagnostic samples, not performance promises. Re-profile real routes after each
 algorithm change and compare candidate counts as well as wall time; a faster run that silently
 reduces the useful search space is a regression.
+
+## Follow-up optimization results
+
+The next measured pass replaced per-sector maps and entry objects with reusable fixed sector slots,
+added a latitude bound before exact arrival-distance calculations, and delayed wind/wave resampling
+until an alternative is actually selected. Route ordering, arrival times, route counts, and minimum
+route separation stayed unchanged in the synthetic regression fixtures.
+
+Compared with the pre-change three-sample baseline, the final seven-sample p50 timings were:
+
+| Search mode                      | Before   | After    | Reduction |
+| -------------------------------- | -------- | -------- | --------- |
+| Exact 373 nm search              | 1,287 ms | 1,062 ms | 17%       |
+| Single-corridor shared search    | 203 ms   | 154 ms   | 24%       |
+| Four-route multi-corridor search | 237 ms   | 197 ms   | 17%       |
+
+The high-arrival fixture returns five alternatives in 14.7 ms p50. Its instrumented route-assembly
+phase fell from 11.2 ms to 7.1 ms because only selected routes receive full wind and wave
+backtracking.
+
+Valid heading-index range generation was tested in allocating and zero-allocation forms. Both
+preserved the exact lattice result, but neither improved end-to-end time; corridor searches became
+3–10% slower. The simple rejected-heading branches are cheaper than constructing the intersection,
+so that experiment was removed rather than retained as unused complexity.
