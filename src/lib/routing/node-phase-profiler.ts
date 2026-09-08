@@ -15,16 +15,40 @@ export const NODE_ROUTING_PHASES = [
   'candidateAndArrival',
   'candidateStamp',
   'prune',
+  'routeAssembly',
   'progress',
 ] as const;
 
 export type NodeRoutingPhase = (typeof NODE_ROUTING_PHASES)[number];
 
+export const NODE_ROUTING_COUNTERS = [
+  'frontierPoints',
+  'headingsConsidered',
+  'polarCacheHits',
+  'polarCacheMisses',
+  'coneDisabled',
+  'waitsAdded',
+  'rejectedCone',
+  'rejectedHeadingChange',
+  'rejectedWindLimit',
+  'rejectedWaveLimit',
+  'rejectedMinSpeed',
+  'rejectedCoverage',
+  'rejectedCorridor',
+  'rejectedDaylight',
+  'rejectedLand',
+  'rejectedSafety',
+  'rejectedRegion',
+  'acceptedCandidates',
+  'arrivalCandidates',
+] as const;
+
+export type NodeRoutingCounter = (typeof NODE_ROUTING_COUNTERS)[number];
+
 export interface NodeRoutingProfileContext {
   attempt: number;
   stage: string;
-  start: { lat: number; lon: number };
-  end: { lat: number; lon: number };
+  routeDistanceNm: number;
   stepsAvailable: number;
   headingStepDeg: number;
   sectorSizeDeg: number;
@@ -36,12 +60,17 @@ interface StepProfile {
   outputFrontier: number;
   candidates: number;
   phasesMs: Record<NodeRoutingPhase, number>;
+  counters: Record<NodeRoutingCounter, number>;
 }
 
 type ProfileEmitter = (line: string) => void;
 
 function emptyPhases(): Record<NodeRoutingPhase, number> {
   return Object.fromEntries(NODE_ROUTING_PHASES.map((phase) => [phase, 0])) as Record<NodeRoutingPhase, number>;
+}
+
+function emptyCounters(): Record<NodeRoutingCounter, number> {
+  return Object.fromEntries(NODE_ROUTING_COUNTERS.map((counter) => [counter, 0])) as Record<NodeRoutingCounter, number>;
 }
 
 function roundedPhases(phases: Record<NodeRoutingPhase, number>): Record<NodeRoutingPhase, number> {
@@ -57,6 +86,7 @@ export class NodeRoutingPhaseProfiler {
   private readonly emit: ProfileEmitter;
   private readonly now: () => number;
   private readonly totals = emptyPhases();
+  private readonly counterTotals = emptyCounters();
   private readonly startedAt: number;
   private current: StepProfile | null = null;
   private completedSteps = 0;
@@ -91,6 +121,12 @@ export class NodeRoutingPhaseProfiler {
     if (this.current) this.current.phasesMs[phase] += duration;
   }
 
+  increment(counter: NodeRoutingCounter, amount = 1): void {
+    if (!this.enabled) return;
+    this.counterTotals[counter] += amount;
+    if (this.current) this.current.counters[counter] += amount;
+  }
+
   startStep(step: number, inputFrontier: number): void {
     if (!this.enabled) return;
     this.current = {
@@ -99,6 +135,7 @@ export class NodeRoutingPhaseProfiler {
       outputFrontier: 0,
       candidates: 0,
       phasesMs: emptyPhases(),
+      counters: emptyCounters(),
     };
     this.peakFrontier = Math.max(this.peakFrontier, inputFrontier);
   }
@@ -140,6 +177,7 @@ export class NodeRoutingPhaseProfiler {
         measuredMs: Number(measuredMs.toFixed(3)),
         unmeasuredMs: Number(Math.max(0, wallMs - measuredMs).toFixed(3)),
         phasesMs: roundedPhases(this.totals),
+        counters: this.counterTotals,
       })}`,
     );
   }

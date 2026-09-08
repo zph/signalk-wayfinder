@@ -6,8 +6,7 @@ import { NodeRoutingPhaseProfiler } from '../routing/node-phase-profiler';
 const context = {
   attempt: 2,
   stage: 'fine',
-  start: { lat: 1, lon: 2 },
-  end: { lat: 3, lon: 4 },
+  routeDistanceNm: 42,
   stepsAvailable: 12,
   headingStepDeg: 5,
   sectorSizeDeg: 1,
@@ -40,6 +39,8 @@ test('NodeRoutingPhaseProfiler emits deterministic step and summary records', ()
   const pruneStarted = profiler.mark();
   clock += 1.25;
   profiler.record('prune', pruneStarted);
+  profiler.increment('headingsConsidered', 12);
+  profiler.increment('rejectedCone', 4);
   profiler.endStep(8, 40);
   clock += 0.75;
   profiler.finish('complete');
@@ -53,12 +54,17 @@ test('NodeRoutingPhaseProfiler emits deterministic step and summary records', ()
   );
   assert.equal(step.phasesMs.wind, 2.5);
   assert.equal(step.phasesMs.prune, 1.25);
+  assert.equal(step.counters.headingsConsidered, 12);
+  assert.equal(step.counters.rejectedCone, 4);
 
   const summary = JSON.parse(lines[1].slice(lines[1].indexOf('{')));
   assert.equal(summary.totalCandidates, 40);
   assert.equal(summary.context.stage, 'fine');
+  assert.equal(summary.context.routeDistanceNm, 42);
+  assert.equal(summary.context.start, undefined);
   assert.equal(summary.peakFrontier, 8);
   assert.equal(summary.wallMs, 4.5);
   assert.equal(summary.measuredMs, 3.75);
   assert.equal(summary.unmeasuredMs, 0.75);
+  assert.equal(summary.counters.headingsConsidered, 12);
 });
