@@ -95,15 +95,17 @@ export class RustSidecarClient {
           finish(new RustSidecarError('Rust sidecar returned invalid JSON', 'invalid_response'));
           return;
         }
-        if (message.requestId !== requestId) return;
         if (message.protocolVersion !== RUST_SIDECAR_PROTOCOL_VERSION) {
           finish(new RustSidecarError('Rust sidecar protocol version mismatch', 'protocol_mismatch'));
           return;
         }
+        // Each exchange owns a dedicated socket, so an error with requestId="unknown" is the
+        // parse failure for this request and must not be ignored until the timeout fires.
         if (message.type === 'error') {
           finish(new RustSidecarError(message.message, message.code));
           return;
         }
+        if (message.requestId !== requestId) return;
         const outcome = handle(message);
         if (outcome.done) finish(undefined, outcome.value);
       });

@@ -14,12 +14,16 @@ The sidecar currently supports open-water routing with:
 - candidate heading expansion;
 - wind and wave limits, motor fallback, and wait-for-wind behavior;
 - current-vector drift;
+- Node-prepared shoreline edge indexes, including polygon holes and point-on-land checks;
+- Node-prepared Signal K avoided-region rings;
+- land/region-aware heading-cone widening and final-arrival checks;
 - two-survivor bearing-sector frontier pruning; and
 - route backtracking and progress events.
 
-It deliberately advertises land avoidance, passage constraints, and navigation safety as
-unsupported. The Node plugin must not select this engine for real routes until those capabilities
-and parity tests exist.
+It advertises geometric land and avoided-region checks, but deliberately advertises passage
+constraints and navigation safety as unsupported. In particular, minimum depth, minimum shoreline
+distance, and maximum offshore distance have not been ported. The Node plugin must not select this
+engine for real routes until those capabilities and broader recorded-route parity tests exist.
 
 ## Process and protocol
 
@@ -28,10 +32,10 @@ JSON over a Unix-domain socket. Every request carries `protocolVersion` and `req
 request returns the engine version and explicit capability flags; a `calculate` request can emit
 zero or more `progress` responses followed by exactly one `result` or `error`.
 
-NDJSON is intentionally a bring-up transport, not the final bulk-grid transport. Serializing full
-GRIB grids copies too much data. The next transport revision should put immutable numeric grids in
-read-only memory-mapped files and send only descriptors over the socket. That keeps Node's cheap
-GRIB discovery and selection work while eliminating JSON copies.
+NDJSON is intentionally a bring-up transport, not the final bulk-data transport. Serializing full
+GRIB grids and shoreline indexes copies too much data. The next transport revision should put
+immutable numeric grids and indexes in read-only memory-mapped files and send only descriptors over
+the socket. That keeps Node's cheap GRIB discovery and selection work while eliminating JSON copies.
 
 ## GDAL boundary
 
@@ -56,8 +60,7 @@ cargo run --manifest-path sidecar/Cargo.toml -- --socket /tmp/wayfinder-core.soc
 ## Production milestones
 
 1. Add memory-mapped grid transport to replace bulk NDJSON arrays.
-2. Port the edge-grid and avoided-region intersection checks.
-3. Port daylight, underway-budget, and navigation-safety behavior.
-4. Run recorded Node/Rust parity fixtures and performance benchmarks on Linux ARM64.
-5. Package signed x64 and ARM64 sidecar binaries and add Node lifecycle supervision.
-6. Register the Rust engine only after it rejects any request requiring an unsupported feature.
+2. Port daylight, underway-budget, and navigation-safety behavior.
+3. Run recorded Node/Rust parity fixtures and performance benchmarks on Linux ARM64.
+4. Package signed x64 and ARM64 sidecar binaries and add Node lifecycle supervision.
+5. Register the Rust engine only after it rejects any request requiring an unsupported feature.

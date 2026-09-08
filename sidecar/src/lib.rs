@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap};
 use std::f64::consts::PI;
@@ -61,6 +61,52 @@ pub struct CurrentGrid {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LandPolygon {
+    pub bbox_lat_min: f64,
+    pub bbox_lat_max: f64,
+    pub bbox_lon_min: f64,
+    pub bbox_lon_max: f64,
+    pub exterior: Vec<f64>,
+    #[serde(default)]
+    pub interiors: Vec<Vec<f64>>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LandEdgeIndex {
+    pub polygons: Vec<LandPolygon>,
+    #[serde(deserialize_with = "deserialize_index_grid")]
+    pub edge_grid: HashMap<i32, Vec<usize>>,
+    #[serde(deserialize_with = "deserialize_index_grid")]
+    pub poly_grid: HashMap<i32, Vec<usize>>,
+}
+
+fn deserialize_index_grid<'de, D>(deserializer: D) -> Result<HashMap<i32, Vec<usize>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    HashMap::<String, Vec<usize>>::deserialize(deserializer)?
+        .into_iter()
+        .map(|(key, value)| {
+            key.parse::<i32>()
+                .map(|parsed| (parsed, value))
+                .map_err(D::Error::custom)
+        })
+        .collect()
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AvoidedRegion {
+    pub bbox_lat_min: f64,
+    pub bbox_lat_max: f64,
+    pub bbox_lon_min: f64,
+    pub bbox_lon_max: f64,
+    pub exterior: Vec<f64>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
 pub struct Polar {
     pub tws: Vec<f64>,
     pub twa: Vec<f64>,
@@ -83,6 +129,7 @@ pub struct CalculateOptions {
     pub min_boat_speed: Option<f64>,
     pub arrival_radius_nm: Option<f64>,
     pub cone_half_angle: Option<f64>,
+    pub cone_disable_lookahead_nm: Option<f64>,
     pub max_heading_change: Option<f64>,
     pub heading_offset_deg: Option<f64>,
     pub max_wind_kn: Option<f64>,
@@ -125,18 +172,30 @@ struct Node {
     parent: Option<usize>,
 }
 
+pub struct RoutingData<'a> {
+    pub wind_sources: &'a [WindGrid],
+    pub current: Option<&'a CurrentGrid>,
+    pub land: Option<&'a LandEdgeIndex>,
+    pub avoided_regions: &'a [AvoidedRegion],
+}
+
 pub fn calculate<F>(
     request: &CalculateRequest,
     options: &CalculateOptions,
     polar: &Polar,
-    wind_sources: &[WindGrid],
-    current: Option<&CurrentGrid>,
+    routing: RoutingData<'_>,
     mut progress: F,
 ) -> Result<Vec<RoutePoint>, String>
 where
     F: FnMut(f64, &[LatLon]),
 {
-    validate(wind_sources, current, polar)?;
+    let RoutingData {
+        wind_sources,
+        current,
+        land,
+        avoided_regions,
+    } = routing;
+    validate(wind_sources, current, polar, land, avoided_regions)?;
     let heading_step = positive(options.heading_step.unwrap_or(5.0), "headingStep")?;
     let sector_size = positive(options.sector_size.unwrap_or(1.0), "sectorSize")?;
     let min_boat_speed = non_negative(options.min_boat_speed.unwrap_or(0.3), "minBoatSpeed")?;
@@ -146,6 +205,10 @@ where
         0.0,
         180.0,
         "coneHalfAngle",
+    )?;
+    let cone_disable_lookahead_nm = positive(
+        options.cone_disable_lookahead_nm.unwrap_or(100.0),
+        "coneDisableLookaheadNm",
     )?;
     let max_heading_change = bounded(
         options.max_heading_change.unwrap_or(120.0),
@@ -173,6 +236,18 @@ where
     if !covers_any(wind_sources, request.start) || !covers_any(wind_sources, request.end) {
         return Err("start and destination must be inside the supplied wind grid".into());
     }
+    if point_in_avoided_region(avoided_regions, request.start) {
+        return Err(
+            "start point is inside an avoided region — move it to open water or unmark that region"
+                .into(),
+        );
+    }
+    if point_in_avoided_region(avoided_regions, request.end) {
+        return Err(
+            "destination is inside an avoided region — move it to open water or unmark that region"
+                .into(),
+        );
+    }
 
     let mut arena = vec![Node {
         position: request.start,
@@ -197,11 +272,35 @@ where
         let mut arrived: Option<(usize, f64)> = None;
         for parent_index in frontier.iter().copied() {
             let point = arena[parent_index].clone();
+            if land.is_some_and(|index| is_point_on_land(index, point.position))
+                || point_in_avoided_region(avoided_regions, point.position)
+            {
+                continue;
+            }
             let (wind_vector, source_path) =
                 sample_selected_wind(wind_sources, point.position, times_ms[step]);
             let tws = wind_speed_knots(wind_vector);
             let wind_dir = wind_direction(wind_vector);
             let destination_bearing = bearing_to(point.position, request.end);
+
+            let distance_to_destination = haversine_nm(point.position, request.end);
+            let cone_check_end = if distance_to_destination <= cone_disable_lookahead_nm {
+                request.end
+            } else {
+                destination_point(
+                    point.position,
+                    cone_disable_lookahead_nm,
+                    destination_bearing,
+                )
+            };
+            let direct_path_blocked = land
+                .is_some_and(|index| segment_crosses_land(index, point.position, cone_check_end))
+                || segment_crosses_avoided_region(avoided_regions, point.position, cone_check_end);
+            let point_cone_half_angle = if direct_path_blocked {
+                180.0
+            } else {
+                cone_half_angle
+            };
 
             if max_wind_kn > 0.0 && tws > max_wind_kn {
                 continue;
@@ -235,7 +334,7 @@ where
             let mut raw_heading = heading_offset;
             while raw_heading < 360.0 + heading_offset {
                 let heading = normalize_degrees(raw_heading);
-                if angle_difference(heading, destination_bearing) > cone_half_angle {
+                if angle_difference(heading, destination_bearing) > point_cone_half_angle {
                     raw_heading += heading_step;
                     continue;
                 }
@@ -276,6 +375,12 @@ where
                     raw_heading += heading_step;
                     continue;
                 }
+                if land.is_some_and(|index| segment_crosses_land(index, point.position, position))
+                    || segment_crosses_avoided_region(avoided_regions, point.position, position)
+                {
+                    raw_heading += heading_step;
+                    continue;
+                }
                 let node_index = arena.len();
                 arena.push(Node {
                     position,
@@ -290,6 +395,7 @@ where
 
                 let remaining = haversine_nm(position, request.end);
                 if remaining <= arrival_radius_nm
+                    && !land.is_some_and(|index| segment_crosses_land(index, position, request.end))
                     && arrived.is_none_or(|(_, best)| remaining < best)
                 {
                     arrived = Some((node_index, remaining));
@@ -327,10 +433,274 @@ where
     Err("destination not reached within the supplied forecast period".into())
 }
 
+fn edge_cell_key(lat_cell: i32, lon_cell: i32) -> i32 {
+    (lat_cell + 900) * 3600 + lon_cell.rem_euclid(3600)
+}
+
+fn point_in_ring(point: LatLon, ring: &[f64]) -> bool {
+    let count = ring.len() / 2;
+    let mut inside = false;
+    let mut previous = count - 1;
+    for current in 0..count {
+        let x = ring[current * 2];
+        let y = ring[current * 2 + 1];
+        let previous_x = ring[previous * 2];
+        let previous_y = ring[previous * 2 + 1];
+        if (y > point.lat) != (previous_y > point.lat)
+            && point.lon < ((previous_x - x) * (point.lat - y)) / (previous_y - y) + x
+        {
+            inside = !inside;
+        }
+        previous = current;
+    }
+    inside
+}
+
+fn is_point_on_land(index: &LandEdgeIndex, point: LatLon) -> bool {
+    let key = (point.lat.floor() as i32 + 90) * 360 + (point.lon.floor() as i32 + 180);
+    index.poly_grid.get(&key).is_some_and(|candidates| {
+        candidates.iter().any(|polygon_index| {
+            let polygon = &index.polygons[*polygon_index];
+            point.lat >= polygon.bbox_lat_min
+                && point.lat <= polygon.bbox_lat_max
+                && point.lon >= polygon.bbox_lon_min
+                && point.lon <= polygon.bbox_lon_max
+                && point_in_ring(point, &polygon.exterior)
+                && !polygon
+                    .interiors
+                    .iter()
+                    .any(|ring| point_in_ring(point, ring))
+        })
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn segments_intersect(
+    x1: f64,
+    y1: f64,
+    x2: f64,
+    y2: f64,
+    x3: f64,
+    y3: f64,
+    x4: f64,
+    y4: f64,
+) -> bool {
+    let first_x = x2 - x1;
+    let first_y = y2 - y1;
+    let second_x = x4 - x3;
+    let second_y = y4 - y3;
+    let cross = first_x * second_y - first_y * second_x;
+    if cross.abs() < 1e-12 {
+        return false;
+    }
+    let delta_x = x3 - x1;
+    let delta_y = y3 - y1;
+    let t = (delta_x * second_y - delta_y * second_x) / cross;
+    let u = (delta_x * first_y - delta_y * first_x) / cross;
+    t > 0.0 && t < 1.0 && u > 0.0 && u < 1.0
+}
+
+fn segment_crosses_ring(start: LatLon, end: LatLon, ring: &[f64]) -> bool {
+    let count = ring.len() / 2;
+    (0..count).any(|edge| {
+        let next = if edge + 1 < count { edge + 1 } else { 0 };
+        segments_intersect(
+            start.lon,
+            start.lat,
+            end.lon,
+            end.lat,
+            ring[edge * 2],
+            ring[edge * 2 + 1],
+            ring[next * 2],
+            ring[next * 2 + 1],
+        )
+    })
+}
+
+fn segment_crosses_land(index: &LandEdgeIndex, start: LatLon, end: LatLon) -> bool {
+    const CELL_DEGREES: f64 = 0.1;
+    let mut lat_cell = (start.lat / CELL_DEGREES).floor() as i32;
+    let mut lon_cell = (start.lon / CELL_DEGREES).floor() as i32;
+    let lat_end = (end.lat / CELL_DEGREES).floor() as i32;
+    let lon_end = (end.lon / CELL_DEGREES).floor() as i32;
+    let delta_lat = end.lat - start.lat;
+    let delta_lon = end.lon - start.lon;
+    let step_lat = if delta_lat > 0.0 {
+        1
+    } else if delta_lat < 0.0 {
+        -1
+    } else {
+        0
+    };
+    let step_lon = if delta_lon > 0.0 {
+        1
+    } else if delta_lon < 0.0 {
+        -1
+    } else {
+        0
+    };
+    let t_delta_lat = if step_lat == 0 {
+        f64::INFINITY
+    } else {
+        (CELL_DEGREES / delta_lat).abs()
+    };
+    let t_delta_lon = if step_lon == 0 {
+        f64::INFINITY
+    } else {
+        (CELL_DEGREES / delta_lon).abs()
+    };
+    let mut t_max_lat = match step_lat {
+        1 => ((lat_cell + 1) as f64 * CELL_DEGREES - start.lat) / delta_lat,
+        -1 => (lat_cell as f64 * CELL_DEGREES - start.lat) / delta_lat,
+        _ => f64::INFINITY,
+    };
+    let mut t_max_lon = match step_lon {
+        1 => ((lon_cell + 1) as f64 * CELL_DEGREES - start.lon) / delta_lon,
+        -1 => (lon_cell as f64 * CELL_DEGREES - start.lon) / delta_lon,
+        _ => f64::INFINITY,
+    };
+    let max_cells = (lat_end - lat_cell).unsigned_abs() + (lon_end - lon_cell).unsigned_abs() + 1;
+
+    for _ in 0..max_cells {
+        if let Some(entries) = index.edge_grid.get(&edge_cell_key(lat_cell, lon_cell)) {
+            for edge_reference in entries.chunks_exact(3) {
+                let polygon = &index.polygons[edge_reference[0]];
+                let ring = if edge_reference[1] == 0 {
+                    &polygon.exterior
+                } else {
+                    &polygon.interiors[edge_reference[1] - 1]
+                };
+                let edge = edge_reference[2];
+                let next = if edge + 1 < ring.len() / 2 {
+                    edge + 1
+                } else {
+                    0
+                };
+                if segments_intersect(
+                    start.lon,
+                    start.lat,
+                    end.lon,
+                    end.lat,
+                    ring[edge * 2],
+                    ring[edge * 2 + 1],
+                    ring[next * 2],
+                    ring[next * 2 + 1],
+                ) {
+                    return true;
+                }
+            }
+        }
+        if lat_cell == lat_end && lon_cell == lon_end {
+            break;
+        }
+        if t_max_lat < t_max_lon {
+            t_max_lat += t_delta_lat;
+            lat_cell += step_lat;
+        } else {
+            t_max_lon += t_delta_lon;
+            lon_cell += step_lon;
+        }
+    }
+    false
+}
+
+fn point_in_avoided_region(regions: &[AvoidedRegion], point: LatLon) -> bool {
+    regions.iter().any(|region| {
+        point.lat >= region.bbox_lat_min
+            && point.lat <= region.bbox_lat_max
+            && point.lon >= region.bbox_lon_min
+            && point.lon <= region.bbox_lon_max
+            && point_in_ring(point, &region.exterior)
+    })
+}
+
+fn segment_crosses_avoided_region(regions: &[AvoidedRegion], start: LatLon, end: LatLon) -> bool {
+    regions.iter().any(|region| {
+        start.lat.max(end.lat) >= region.bbox_lat_min
+            && start.lat.min(end.lat) <= region.bbox_lat_max
+            && start.lon.max(end.lon) >= region.bbox_lon_min
+            && start.lon.min(end.lon) <= region.bbox_lon_max
+            && segment_crosses_ring(start, end, &region.exterior)
+    })
+}
+
+fn validate_bbox(
+    lat_min: f64,
+    lat_max: f64,
+    lon_min: f64,
+    lon_max: f64,
+    name: &str,
+) -> Result<(), String> {
+    if [lat_min, lat_max, lon_min, lon_max]
+        .iter()
+        .all(|value| value.is_finite())
+        && lat_min <= lat_max
+        && lon_min <= lon_max
+    {
+        Ok(())
+    } else {
+        Err(format!("{name} bounding box is invalid"))
+    }
+}
+
+fn validate_ring(ring: &[f64], name: &str) -> Result<(), String> {
+    if ring.len() >= 6 && ring.len().is_multiple_of(2) && ring.iter().all(|value| value.is_finite())
+    {
+        Ok(())
+    } else {
+        Err(format!("{name} ring is invalid"))
+    }
+}
+
+fn validate_land_index(index: &LandEdgeIndex) -> Result<(), String> {
+    for polygon in &index.polygons {
+        validate_bbox(
+            polygon.bbox_lat_min,
+            polygon.bbox_lat_max,
+            polygon.bbox_lon_min,
+            polygon.bbox_lon_max,
+            "land polygon",
+        )?;
+        validate_ring(&polygon.exterior, "land polygon exterior")?;
+        for ring in &polygon.interiors {
+            validate_ring(ring, "land polygon interior")?;
+        }
+    }
+    if index
+        .poly_grid
+        .values()
+        .flatten()
+        .any(|polygon| *polygon >= index.polygons.len())
+    {
+        return Err("land polygon grid contains an invalid polygon index".into());
+    }
+    for entries in index.edge_grid.values() {
+        if !entries.len().is_multiple_of(3) {
+            return Err("land edge grid contains an incomplete edge reference".into());
+        }
+        for edge_reference in entries.chunks_exact(3) {
+            let Some(polygon) = index.polygons.get(edge_reference[0]) else {
+                return Err("land edge grid contains an invalid polygon index".into());
+            };
+            let ring = if edge_reference[1] == 0 {
+                Some(&polygon.exterior)
+            } else {
+                polygon.interiors.get(edge_reference[1] - 1)
+            };
+            if ring.is_none_or(|ring| edge_reference[2] >= ring.len() / 2) {
+                return Err("land edge grid contains an invalid ring or edge index".into());
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate(
     wind_sources: &[WindGrid],
     current: Option<&CurrentGrid>,
     polar: &Polar,
+    land: Option<&LandEdgeIndex>,
+    avoided_regions: &[AvoidedRegion],
 ) -> Result<(), String> {
     if wind_sources.is_empty() {
         return Err("at least one wind source is required".into());
@@ -403,6 +773,19 @@ fn validate(
         || polar.twa.windows(2).any(|pair| pair[0] >= pair[1])
     {
         return Err("polar dimensions are invalid".into());
+    }
+    if let Some(index) = land {
+        validate_land_index(index)?;
+    }
+    for region in avoided_regions {
+        validate_ring(&region.exterior, "avoided region")?;
+        validate_bbox(
+            region.bbox_lat_min,
+            region.bbox_lat_max,
+            region.bbox_lon_min,
+            region.bbox_lon_max,
+            "avoided region",
+        )?;
     }
     Ok(())
 }
@@ -994,10 +1377,54 @@ mod tests {
         )
     }
 
+    fn small_land_index(with_harbor: bool) -> LandEdgeIndex {
+        let exterior = vec![11.02, 41.01, 11.04, 41.01, 11.04, 41.04, 11.02, 41.04];
+        let interiors = if with_harbor {
+            vec![vec![
+                11.025, 41.02, 11.035, 41.02, 11.035, 41.03, 11.025, 41.03,
+            ]]
+        } else {
+            vec![]
+        };
+        let mut edge_entries = Vec::new();
+        for edge in 0..4 {
+            edge_entries.extend([0, 0, edge]);
+        }
+        if with_harbor {
+            for edge in 0..4 {
+                edge_entries.extend([0, 1, edge]);
+            }
+        }
+        LandEdgeIndex {
+            polygons: vec![LandPolygon {
+                bbox_lat_min: 41.01,
+                bbox_lat_max: 41.04,
+                bbox_lon_min: 11.02,
+                bbox_lon_max: 11.04,
+                exterior,
+                interiors,
+            }],
+            edge_grid: HashMap::from([(edge_cell_key(410, 110), edge_entries)]),
+            poly_grid: HashMap::from([((41 + 90) * 360 + (11 + 180), vec![0])]),
+        }
+    }
+
     #[test]
     fn calculates_an_open_water_route() {
         let (request, options, polar, wind) = fixture();
-        let route = calculate(&request, &options, &polar, &[wind], None, |_, _| {}).unwrap();
+        let route = calculate(
+            &request,
+            &options,
+            &polar,
+            RoutingData {
+                wind_sources: &[wind],
+                current: None,
+                land: None,
+                avoided_regions: &[],
+            },
+            |_, _| {},
+        )
+        .unwrap();
         assert_eq!(route.first().unwrap().lat, request.start.lat);
         assert_eq!(route.last().unwrap().lat, request.end.lat);
         assert!(route.len() >= 3);
@@ -1008,9 +1435,20 @@ mod tests {
         let (request, options, polar, mut wind) = fixture();
         wind.u10[0].pop();
         assert!(
-            calculate(&request, &options, &polar, &[wind], None, |_, _| {})
-                .unwrap_err()
-                .contains("dimensions")
+            calculate(
+                &request,
+                &options,
+                &polar,
+                RoutingData {
+                    wind_sources: &[wind],
+                    current: None,
+                    land: None,
+                    avoided_regions: &[],
+                },
+                |_, _| {}
+            )
+            .unwrap_err()
+            .contains("dimensions")
         );
     }
 
@@ -1020,8 +1458,19 @@ mod tests {
         let mut newer = older.clone();
         newer.source_path = Some("newer.grib2".into());
         newer.reference_time_ms += 1;
-        let route =
-            calculate(&request, &options, &polar, &[older, newer], None, |_, _| {}).unwrap();
+        let route = calculate(
+            &request,
+            &options,
+            &polar,
+            RoutingData {
+                wind_sources: &[older, newer],
+                current: None,
+                land: None,
+                avoided_regions: &[],
+            },
+            |_, _| {},
+        )
+        .unwrap();
         assert_eq!(route[1].grib_file_path.as_deref(), Some("newer.grib2"));
     }
 
@@ -1044,8 +1493,12 @@ mod tests {
             &request,
             &options,
             &polar,
-            &[wind],
-            Some(&current),
+            RoutingData {
+                wind_sources: &[wind],
+                current: Some(&current),
+                land: None,
+                avoided_regions: &[],
+            },
             |_, _| {},
         )
         .unwrap();
@@ -1064,7 +1517,19 @@ mod tests {
         }
         options.motor_speed_kn = Some(5.0);
         options.force_motor = Some(true);
-        let route = calculate(&request, &options, &polar, &[wind], None, |_, _| {}).unwrap();
+        let route = calculate(
+            &request,
+            &options,
+            &polar,
+            RoutingData {
+                wind_sources: &[wind],
+                current: None,
+                land: None,
+                avoided_regions: &[],
+            },
+            |_, _| {},
+        )
+        .unwrap();
         assert!(
             route
                 .iter()
@@ -1078,7 +1543,19 @@ mod tests {
         let (request, mut options, polar, mut wind) = fixture();
         wind.v10[0].fill(0.0);
         options.wait_for_wind = Some(true);
-        let route = calculate(&request, &options, &polar, &[wind], None, |_, _| {}).unwrap();
+        let route = calculate(
+            &request,
+            &options,
+            &polar,
+            RoutingData {
+                wind_sources: &[wind],
+                current: None,
+                land: None,
+                avoided_regions: &[],
+            },
+            |_, _| {},
+        )
+        .unwrap();
         assert!(route.iter().any(|point| point.propulsion == Some("wait")));
     }
 
@@ -1096,7 +1573,142 @@ mod tests {
             values: vec![vec![3.0; 25]; wind.times_ms.len()],
         });
         options.max_wave_m = Some(2.0);
-        let error = calculate(&request, &options, &polar, &[wind], None, |_, _| {}).unwrap_err();
+        let error = calculate(
+            &request,
+            &options,
+            &polar,
+            RoutingData {
+                wind_sources: &[wind],
+                current: None,
+                land: None,
+                avoided_regions: &[],
+            },
+            |_, _| {},
+        )
+        .unwrap_err();
+        assert!(error.contains("frontier exhausted"));
+    }
+
+    #[test]
+    fn land_index_matches_point_and_strict_edge_semantics() {
+        let land = small_land_index(false);
+        assert!(is_point_on_land(
+            &land,
+            LatLon {
+                lat: 41.02,
+                lon: 11.03
+            }
+        ));
+        assert!(!is_point_on_land(
+            &land,
+            LatLon {
+                lat: 41.02,
+                lon: 11.01
+            }
+        ));
+        assert!(segment_crosses_land(
+            &land,
+            LatLon {
+                lat: 41.02,
+                lon: 11.01
+            },
+            LatLon {
+                lat: 41.02,
+                lon: 11.05
+            }
+        ));
+        assert!(!segments_intersect(0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 1.0));
+    }
+
+    #[test]
+    fn land_polygon_interiors_remain_navigable() {
+        let land = small_land_index(true);
+        assert!(!is_point_on_land(
+            &land,
+            LatLon {
+                lat: 41.025,
+                lon: 11.03
+            }
+        ));
+        assert!(is_point_on_land(
+            &land,
+            LatLon {
+                lat: 41.015,
+                lon: 11.03
+            }
+        ));
+    }
+
+    #[test]
+    fn avoided_regions_reject_endpoints_and_crossing_segments() {
+        let region = AvoidedRegion {
+            bbox_lat_min: 41.01,
+            bbox_lat_max: 41.04,
+            bbox_lon_min: 11.02,
+            bbox_lon_max: 11.04,
+            exterior: vec![11.02, 41.01, 11.04, 41.01, 11.04, 41.04, 11.02, 41.04],
+        };
+        assert!(point_in_avoided_region(
+            std::slice::from_ref(&region),
+            LatLon {
+                lat: 41.02,
+                lon: 11.03
+            }
+        ));
+        assert!(segment_crosses_avoided_region(
+            std::slice::from_ref(&region),
+            LatLon {
+                lat: 41.02,
+                lon: 11.01
+            },
+            LatLon {
+                lat: 41.02,
+                lon: 11.05
+            }
+        ));
+
+        let (mut request, options, polar, wind) = fixture();
+        request.start = LatLon {
+            lat: 41.02,
+            lon: 11.03,
+        };
+        let error = calculate(
+            &request,
+            &options,
+            &polar,
+            RoutingData {
+                wind_sources: &[wind],
+                current: None,
+                land: None,
+                avoided_regions: &[region],
+            },
+            |_, _| {},
+        )
+        .unwrap_err();
+        assert!(error.contains("start point is inside an avoided region"));
+    }
+
+    #[test]
+    fn land_rejects_a_frontier_seed_inside_a_polygon() {
+        let (mut request, options, polar, wind) = fixture();
+        request.start = LatLon {
+            lat: 41.02,
+            lon: 11.03,
+        };
+        let land = small_land_index(false);
+        let error = calculate(
+            &request,
+            &options,
+            &polar,
+            RoutingData {
+                wind_sources: &[wind],
+                current: None,
+                land: Some(&land),
+                avoided_regions: &[],
+            },
+            |_, _| {},
+        )
+        .unwrap_err();
         assert!(error.contains("frontier exhausted"));
     }
 }

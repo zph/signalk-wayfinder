@@ -5,10 +5,24 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import type { CurrentFileEntry, CurrentGribData, GribData, GribFileEntry, PolarData } from '../../types';
+import type {
+  CurrentFileEntry,
+  CurrentGribData,
+  GribData,
+  GribFileEntry,
+  LandPolygon,
+  PolarData,
+  RegionIndex,
+} from '../../types';
 import { SingleFileCurrentProvider } from '../currentprovider';
+import { buildLandEdgeIndex, isPointOnLand, segmentCrossesLandFast } from '../landmask';
 import { RustSidecarClient } from '../routing/rust-sidecar-client';
-import { serializeCurrentGrid, serializeWindGrid } from '../routing/rust-sidecar-protocol';
+import {
+  serializeAvoidedRegions,
+  serializeCurrentGrid,
+  serializeLandEdgeIndex,
+  serializeWindGrid,
+} from '../routing/rust-sidecar-protocol';
 import { IsochroneAlgorithm } from '../routing/isochrone';
 import { MultiFileWindProvider } from '../windprovider';
 
@@ -36,7 +50,7 @@ test('Rust sidecar negotiates capabilities and calculates an open-water route', 
     await waitForSidecar(client, child);
     const hello = await client.hello();
     assert.equal(hello.capabilities.openWaterWind, true);
-    assert.equal(hello.capabilities.landAvoidance, false);
+    assert.equal(hello.capabilities.landAvoidance, true);
     assert.equal(hello.capabilities.multipleWindSources, true);
     assert.equal(hello.capabilities.currents, true);
     assert.equal(hello.capabilities.waves, true);
@@ -234,6 +248,103 @@ test('Rust sidecar negotiates capabilities and calculates an open-water route', 
     );
     assert.equal(rustMotoring.length, nodeMotoring.route.length);
     assert.ok(rustMotoring.slice(1).every((point) => point.propulsion === 'motor'));
+
+    const enclosingPolygon: LandPolygon = {
+      bboxLatMin: 40.99,
+      bboxLatMax: 41.01,
+      bboxLonMin: 10.99,
+      bboxLonMax: 11.01,
+      exterior: new Float64Array([10.99, 40.99, 11.01, 40.99, 11.01, 41.01, 10.99, 41.01]),
+    };
+    const land = serializeLandEdgeIndex(buildLandEdgeIndex([enclosingPolygon]));
+    assert.equal(land.polygons[0].exterior.length, enclosingPolygon.exterior.length);
+    assert.ok(Object.keys(land.edgeGrid).length > 0);
+    assert.equal(isPointOnLand(buildLandEdgeIndex([enclosingPolygon]), 41, 11), true);
+    await assert.rejects(
+      client.calculate({
+        request: {
+          start: { lat: 41, lon: 11 },
+          end: { lat: 41.2, lon: 11 },
+          departureTimeMs: times[0].getTime(),
+        },
+        options: { arrivalRadiusNm: 1 },
+        polar,
+        windSources: [serializeWindGrid(grib, 'fixture.grib2')],
+        land,
+      }),
+      /frontier exhausted/,
+    );
+
+    const blockingPolygon: LandPolygon = {
+      bboxLatMin: 41.08,
+      bboxLatMax: 41.12,
+      bboxLonMin: 10.98,
+      bboxLonMax: 11.02,
+      exterior: new Float64Array([10.98, 41.08, 11.02, 41.08, 11.02, 41.12, 10.98, 41.12]),
+    };
+    const blockingIndex = buildLandEdgeIndex([blockingPolygon]);
+    const rustDetour = await client.calculate({
+      request: {
+        start: { lat: 41, lon: 11 },
+        end: { lat: 41.2, lon: 11 },
+        departureTimeMs: times[0].getTime(),
+      },
+      options: { arrivalRadiusNm: 1 },
+      polar,
+      windSources: [serializeWindGrid(grib, 'fixture.grib2')],
+      land: serializeLandEdgeIndex(blockingIndex),
+    });
+    const nodeDetour = await new IsochroneAlgorithm().calculate(
+      new MultiFileWindProvider([entry]),
+      null,
+      polar,
+      blockingIndex,
+      null,
+      {
+        start: { lat: 41, lon: 11 },
+        end: { lat: 41.2, lon: 11 },
+        departureTime: times[0].toISOString(),
+      },
+      () => {},
+      { arrivalRadiusNm: 1 },
+    );
+    for (let index = 1; index < rustDetour.length; index += 1) {
+      const previous = rustDetour[index - 1];
+      const point = rustDetour[index];
+      assert.equal(segmentCrossesLandFast(blockingIndex, previous.lat, previous.lon, point.lat, point.lon), false);
+    }
+    assert.ok(Math.abs(rustDetour.at(-1)!.time.getTime() - nodeDetour.route.at(-1)!.time.getTime()) <= 3_600_000);
+
+    const regionIndex: RegionIndex = {
+      regions: new Map([
+        [
+          'avoidance-fixture__0',
+          {
+            bboxLatMin: 40.99,
+            bboxLatMax: 41.01,
+            bboxLonMin: 10.99,
+            bboxLonMax: 11.01,
+            exterior: enclosingPolygon.exterior,
+          },
+        ],
+      ]),
+    };
+    const avoidedRegions = serializeAvoidedRegions(regionIndex, ['avoidance-fixture']);
+    assert.equal(avoidedRegions.length, 1);
+    await assert.rejects(
+      client.calculate({
+        request: {
+          start: { lat: 41, lon: 11 },
+          end: { lat: 41.2, lon: 11 },
+          departureTimeMs: times[0].getTime(),
+        },
+        options: { arrivalRadiusNm: 1 },
+        polar,
+        windSources: [serializeWindGrid(grib, 'fixture.grib2')],
+        avoidedRegions,
+      }),
+      /start point is inside an avoided region/,
+    );
   } finally {
     child.kill('SIGTERM');
     await new Promise<void>((resolve) => child.once('exit', () => resolve()));

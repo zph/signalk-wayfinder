@@ -7,7 +7,8 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::{env, process};
 use wayfinder_core_sidecar::{
-    CalculateOptions, CalculateRequest, CurrentGrid, LatLon, Polar, WindGrid, calculate,
+    AvoidedRegion, CalculateOptions, CalculateRequest, CurrentGrid, LandEdgeIndex, LatLon, Polar,
+    RoutingData, WindGrid, calculate,
 };
 
 const PROTOCOL_VERSION: u32 = 2;
@@ -22,6 +23,9 @@ struct CalculationInput {
     polar: Polar,
     wind_sources: Vec<WindGrid>,
     current: Option<CurrentGrid>,
+    land: Option<LandEdgeIndex>,
+    #[serde(default)]
+    avoided_regions: Vec<AvoidedRegion>,
 }
 
 #[derive(Deserialize)]
@@ -110,7 +114,7 @@ fn handle(stream: UnixStream) -> std::io::Result<()> {
                         "engineVersion": env!("CARGO_PKG_VERSION"),
                         "capabilities": {
                             "openWaterWind": true,
-                            "landAvoidance": false,
+                            "landAvoidance": true,
                             "currents": true,
                             "waves": true,
                             "multipleWindSources": true,
@@ -143,13 +147,19 @@ fn handle(stream: UnixStream) -> std::io::Result<()> {
                     polar,
                     wind_sources,
                     current,
+                    land,
+                    avoided_regions,
                 } = *calculation;
                 let outcome = calculate(
                     &request,
                     &options,
                     &polar,
-                    &wind_sources,
-                    current.as_ref(),
+                    RoutingData {
+                        wind_sources: &wind_sources,
+                        current: current.as_ref(),
+                        land: land.as_ref(),
+                        avoided_regions: &avoided_regions,
+                    },
                     |percent, frontier: &[LatLon]| {
                         let _ = send(
                             &mut writer,

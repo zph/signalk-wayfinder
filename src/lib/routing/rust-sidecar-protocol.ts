@@ -3,8 +3,10 @@ import type {
   GribData,
   GribFileEntry,
   GribFileMeta,
+  LandEdgeIndex,
   LatLon,
   PolarData,
+  RegionIndex,
   RoutePoint,
 } from '../../types';
 
@@ -62,6 +64,29 @@ export interface RustCurrentGrid {
   v: number[][];
 }
 
+export interface RustLandPolygon {
+  bboxLatMin: number;
+  bboxLatMax: number;
+  bboxLonMin: number;
+  bboxLonMax: number;
+  exterior: number[];
+  interiors: number[][];
+}
+
+export interface RustLandEdgeIndex {
+  polygons: RustLandPolygon[];
+  edgeGrid: Record<string, number[]>;
+  polyGrid: Record<string, number[]>;
+}
+
+export interface RustAvoidedRegion {
+  bboxLatMin: number;
+  bboxLatMax: number;
+  bboxLonMin: number;
+  bboxLonMax: number;
+  exterior: number[];
+}
+
 export interface RustCalculatePayload {
   request: { start: LatLon; end: LatLon; departureTimeMs: number };
   options: {
@@ -70,6 +95,7 @@ export interface RustCalculatePayload {
     minBoatSpeed?: number;
     arrivalRadiusNm?: number;
     coneHalfAngle?: number;
+    coneDisableLookaheadNm?: number;
     maxHeadingChange?: number;
     headingOffsetDeg?: number;
     maxWindKn?: number;
@@ -82,6 +108,8 @@ export interface RustCalculatePayload {
   polar: PolarData;
   windSources: RustWindGrid[];
   current?: RustCurrentGrid;
+  land?: RustLandEdgeIndex;
+  avoidedRegions?: RustAvoidedRegion[];
 }
 
 export type RustSidecarResponse =
@@ -157,4 +185,36 @@ export function serializeWindSources(entries: GribFileEntry[]): RustWindGrid[] {
     if (!entry.data) throw new Error(`Cannot serialize unloaded GRIB source: ${entry.meta.path}`);
     return serializeWindGrid(entry.data, entry.meta.path, entry.meta);
   });
+}
+
+export function serializeLandEdgeIndex(index: LandEdgeIndex): RustLandEdgeIndex {
+  return {
+    polygons: index.polygons.map((polygon) => ({
+      bboxLatMin: polygon.bboxLatMin,
+      bboxLatMax: polygon.bboxLatMax,
+      bboxLonMin: polygon.bboxLonMin,
+      bboxLonMax: polygon.bboxLonMax,
+      exterior: Array.from(polygon.exterior),
+      interiors: (polygon.interiors ?? []).map((ring) => Array.from(ring)),
+    })),
+    edgeGrid: Object.fromEntries([...index.edgeGrid].map(([key, entries]) => [String(key), Array.from(entries)])),
+    polyGrid: Object.fromEntries([...index.polyGrid].map(([key, entries]) => [String(key), entries])),
+  };
+}
+
+export function serializeAvoidedRegions(index: RegionIndex, avoidIds: Iterable<string>): RustAvoidedRegion[] {
+  const selected = new Set(avoidIds);
+  const regions: RustAvoidedRegion[] = [];
+  for (const [key, ring] of index.regions) {
+    const uuid = key.includes('__') ? key.split('__')[0] : key;
+    if (!selected.has(uuid)) continue;
+    regions.push({
+      bboxLatMin: ring.bboxLatMin,
+      bboxLatMax: ring.bboxLatMax,
+      bboxLonMin: ring.bboxLonMin,
+      bboxLonMax: ring.bboxLonMax,
+      exterior: Array.from(ring.exterior),
+    });
+  }
+  return regions;
 }
