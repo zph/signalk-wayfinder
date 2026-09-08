@@ -3,6 +3,7 @@ import type {
   CurrentGribData,
   GribData,
   GribFileMeta,
+  LandEdgeIndex,
   LatLon,
   PolarData,
   RegionRing,
@@ -18,6 +19,7 @@ export interface AlternativeWorkerInitialization {
   dataDir: string;
   hiresLand: boolean;
   routeLandMode: WorkerLandMode;
+  inlineLandIndex?: LandEdgeIndex;
   needsShorelineIndex: boolean;
   regions: Array<[string, RegionRing]>;
   request: CalculationRequest;

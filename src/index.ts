@@ -76,6 +76,8 @@ import {
 } from './lib/routing/alternative-worker-runner';
 import type { AlternativeWorkerInitialization } from './lib/routing/alternative-worker-protocol';
 import { shareCurrentGribData, shareGribData } from './lib/shared-grib';
+import { ensureAutoGrib } from './lib/auto-grib';
+import { resolveChartGeometry } from './lib/chart-geometry';
 
 const ALGORITHMS: Map<string, RoutingAlgorithm> = new Map([['isochrone', new IsochroneAlgorithm()]]);
 
@@ -343,6 +345,13 @@ module.exports = (app: SignalKApp) => {
           title: 'Path to GRIB2 directory',
           description: 'Filesystem path to a directory containing GRIB2 weather forecast files (e.g. from OpenSkiron)',
         },
+        autoGribEnabled: {
+          type: 'boolean',
+          title: 'Automatically acquire route forecast',
+          description:
+            'Before each current or future route calculation, download and cache NOAA GFS wind and wave GRIB data for the requested route, departure, and estimated passage duration.',
+          default: true,
+        },
         polarPath: {
           type: 'string',
           title: 'Path to polar CSV file',
@@ -563,10 +572,6 @@ module.exports = (app: SignalKApp) => {
       });
 
       binnacleRoute(router, 'calculate').post('/calculate', async (req: Request, res: Response) => {
-        if (gribFiles.length === 0)
-          return void res.status(503).json({
-            error: 'No GRIB files indexed — configure gribDir and reload',
-          });
         if (!polar) return void res.status(503).json({ error: 'Polar data not loaded' });
         const routePolar = polar;
         if (calcStatus.status === 'calculating') {
@@ -604,6 +609,8 @@ module.exports = (app: SignalKApp) => {
         if (!inputValidation.valid) {
           return void res.status(400).json({ error: inputValidation.error });
         }
+        const waypoints: Array<LatLon> = Array.isArray(req.body?.waypoints) ? req.body.waypoints : [];
+        const points: Array<LatLon> = [start, ...waypoints, end];
 
         const algorithmId: string = settings?.algorithm ?? DEFAULT_ALGORITHM;
         const algorithm = ALGORITHMS.get(algorithmId);
@@ -613,13 +620,35 @@ module.exports = (app: SignalKApp) => {
 
         const useLandAvoidance = req.body?.useLandAvoidance !== false; // default true
         const useSafetyMargin = req.body?.useSafetyMargin === true;
-        if (useSafetyMargin && !dilatedEdgeIndex) {
+        let chartGeometry: Awaited<ReturnType<typeof resolveChartGeometry>> = null;
+        if (useLandAvoidance || Number(mergedOptions.minimumShoreDistanceNm ?? 0) > 0) {
+          try {
+            const charts = await app.resourcesApi?.listResources('charts', {});
+            if (charts) {
+              const origin = `http://127.0.0.1:${req.socket.localPort}`;
+              chartGeometry = await resolveChartGeometry(charts, points, origin);
+              if (chartGeometry)
+                app.debug(
+                  `Using ${chartGeometry.source} z${chartGeometry.zoom} (${chartGeometry.tileCount} tiles) for route geometry`,
+                );
+            }
+          } catch (error) {
+            app.debug(`Chart geometry unavailable; using GSHHG fallback: ${String(error)}`);
+          }
+        }
+        if (useSafetyMargin && !chartGeometry && !dilatedEdgeIndex) {
           return void res.status(503).json({ error: 'Safety margin index not ready yet' });
         }
-        const activeIndex = !useLandAvoidance ? null : useSafetyMargin ? dilatedEdgeIndex : edgeIndex;
+        const shorelineIndex = chartGeometry?.index ?? edgeIndex;
+        const activeIndex = !useLandAvoidance
+          ? null
+          : (chartGeometry?.index ?? (useSafetyMargin ? dilatedEdgeIndex : edgeIndex));
         const navigationConstraints: NavigationConstraints = {
           minimumDepthM: Number(mergedOptions.minimumDepthM ?? 0),
-          minimumShoreDistanceNm: Number(mergedOptions.minimumShoreDistanceNm ?? 0),
+          minimumShoreDistanceNm: Math.max(
+            Number(mergedOptions.minimumShoreDistanceNm ?? 0),
+            useSafetyMargin && chartGeometry ? 0.5 : 0,
+          ),
           maximumOffshoreDistanceNm: Number(mergedOptions.maximumOffshoreDistanceNm ?? 0),
         };
         if (navigationConstraints.minimumDepthM > 0 && !depthProvider) {
@@ -629,14 +658,14 @@ module.exports = (app: SignalKApp) => {
         }
         if (
           (navigationConstraints.minimumShoreDistanceNm > 0 || navigationConstraints.maximumOffshoreDistanceNm > 0) &&
-          !edgeIndex
+          !shorelineIndex
         ) {
           return void res.status(503).json({ error: 'Shoreline distance constraints require the shoreline index' });
         }
 
         const endpointViolation = (point: LatLon): ReturnType<typeof navigationConstraintViolation> =>
           navigationConstraintViolation(
-            edgeIndex,
+            shorelineIndex,
             depthProvider,
             navigationConstraints,
             point.lat,
@@ -676,6 +705,33 @@ module.exports = (app: SignalKApp) => {
             error: 'Invalid departureTime — expected ISO 8601 string',
           });
         }
+        if (settings?.autoGribEnabled !== false && req.body?.enabledGribPaths == null) {
+          if (!settings?.gribDir)
+            return void res.status(503).json({ error: 'Automatic forecast acquisition requires gribDir' });
+          app.setPluginStatus('Acquiring route-specific NOAA GFS forecast...');
+          try {
+            const acquired = await ensureAutoGrib({
+              points,
+              departureTime: new Date(departureMs),
+              planningSpeedKn: Math.max(1, Number(mergedOptions.motorSpeedKn ?? 6) || 6),
+              maxHoursPerDay: Number(mergedOptions.maxHoursPerDay ?? 0),
+              gribDir: settings.gribDir,
+            });
+            app.debug(
+              `${acquired.cacheHit ? 'Reused' : 'Downloaded'} ${nodepath.basename(acquired.path)} through f${acquired.forecastHours}`,
+            );
+            await scanAndIndexGribDir(settings.gribDir);
+          } catch (error) {
+            return void res.status(503).json({
+              error: `Automatic forecast acquisition failed: ${error instanceof Error ? error.message : String(error)}`,
+            });
+          }
+        }
+        if (gribFiles.length === 0)
+          return void res
+            .status(503)
+            .json({ error: 'No GRIB files indexed — configure automatic acquisition or gribDir' });
+
         const enabledPaths: string[] | undefined = req.body?.enabledGribPaths;
         const selectedEntries = gribFiles.filter(
           (f) =>
@@ -714,7 +770,6 @@ module.exports = (app: SignalKApp) => {
           });
         }
 
-        const waypoints: Array<LatLon> = Array.isArray(req.body?.waypoints) ? req.body.waypoints : [];
         for (let i = 0; i < waypoints.length; i++) {
           const wp = waypoints[i];
           if (useLandAvoidance && activeIndex) {
@@ -784,7 +839,6 @@ module.exports = (app: SignalKApp) => {
           const attemptCount = requestedCount === 1 ? 1 : Math.min(20, requestedCount * 2);
           const candidates: RouteAlternative[] = [];
           let lastCandidateError: Error | undefined;
-          const points: Array<LatLon> = [start, ...waypoints, end];
           const needsShorelineIndex =
             navigationConstraints.minimumShoreDistanceNm > 0 || navigationConstraints.maximumOffshoreDistanceNm > 0;
           const tasks = Array.from({ length: attemptCount }, (_, attempt) => ({
@@ -826,7 +880,7 @@ module.exports = (app: SignalKApp) => {
                       pushSse({ type: 'progress', progress, frontier });
                     },
                     continuationOptions,
-                    { shorelineIndex: edgeIndex, depthProvider },
+                    { shorelineIndex, depthProvider },
                   );
                   if (result.warning) warnings.push(`Leg ${leg + 1}: ${result.warning}`);
                   fullRoute.push(...(leg === 0 ? result.route : result.route.slice(1)));
@@ -874,6 +928,7 @@ module.exports = (app: SignalKApp) => {
               dataDir: pluginDataDir(app),
               hiresLand: hiresActive,
               routeLandMode: !useLandAvoidance ? 'none' : useSafetyMargin ? 'dilated' : 'base',
+              ...(chartGeometry ? { inlineLandIndex: chartGeometry.index } : {}),
               needsShorelineIndex,
               regions: regionIndex ? Array.from(regionIndex.regions.entries()) : [],
               request: { ...req.body, start, end, departureTime, waypoints },
@@ -907,7 +962,7 @@ module.exports = (app: SignalKApp) => {
                 ...(outcome.warning ? {} : { end }),
                 polar: routePolar,
                 landIndex: activeIndex,
-                shorelineIndex: edgeIndex,
+                shorelineIndex,
                 regionIndex,
                 avoidRegionIds: new Set(req.body.avoidRegionIds ?? settings?.avoidRegionIds ?? []),
                 useLandAvoidance,

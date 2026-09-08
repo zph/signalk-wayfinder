@@ -49,15 +49,17 @@
     "@signalk/server-api": ">=2.0.0"
   },
   "optionalDependencies": {
-    "@kristianwiklund/wr-gdal-linux-x64": "3.12.3",
-    "@kristianwiklund/wr-gdal-linux-arm64": "3.12.3"
+    "@kristianwiklund/wr-gdal-linux-arm64": "3.12.3",
+    "@kristianwiklund/wr-gdal-linux-x64": "3.12.3"
   },
   "dependencies": {
     "@kristianwiklund/wr-land-data": "1.0.0",
+    "@mapbox/vector-tile": "^2.0.4",
+    "express": "^4.21.0",
     "gdal-async": "^3.9.0",
     "jsts": "^2.12.1",
-    "express": "^4.21.0",
-    "leaflet": "^1.9.4"
+    "leaflet": "^1.9.4",
+    "pbf": "^4.0.1"
   },
   "devDependencies": {
     "@signalk/server-api": "^2.0.0",

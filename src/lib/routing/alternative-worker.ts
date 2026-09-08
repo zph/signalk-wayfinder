@@ -51,11 +51,14 @@ async function initialize(): Promise<{
 
   let baseLandIndex: LandEdgeIndex | null = null;
   let routeLandIndex: LandEdgeIndex | null = null;
-  if (initialization.routeLandMode === 'base' || initialization.needsShorelineIndex) {
+  if (initialization.inlineLandIndex) {
+    baseLandIndex = initialization.inlineLandIndex;
+  } else if (initialization.routeLandMode === 'base' || initialization.needsShorelineIndex) {
     baseLandIndex = loadBaseLandIndex();
   }
   if (initialization.routeLandMode === 'base') routeLandIndex = baseLandIndex;
-  if (initialization.routeLandMode === 'dilated') routeLandIndex = loadDilatedLandIndex();
+  if (initialization.routeLandMode === 'dilated')
+    routeLandIndex = initialization.inlineLandIndex ?? loadDilatedLandIndex();
 
   const regionIndex: RegionIndex | null =
     initialization.regions.length > 0 ? { regions: new Map(initialization.regions) } : null;

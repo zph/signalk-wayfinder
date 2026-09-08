@@ -8,7 +8,10 @@ export interface SignalKResourceEntry {
 }
 
 export interface SignalKResourcesApi {
-  listResources(category: string): Promise<SignalKResourceEntry[] | Record<string, SignalKResourceEntry>>;
+  listResources(
+    category: string,
+    params?: Record<string, unknown>,
+  ): Promise<SignalKResourceEntry[] | Record<string, SignalKResourceEntry>>;
   setResource(category: string, id: string, resource: unknown): Promise<void>;
 }
 
