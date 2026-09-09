@@ -148,6 +148,7 @@ export interface RoutePoint {
   legCalcMs: number; // wall-clock ms the algorithm spent computing this leg; 0 for start and destination
   waveHeight?: number; // significant wave height (m), present when swh data available in GRIB
   gribFilePath?: string; // path of the GRIB file that supplied weather data at this waypoint
+  shoreClearanceEstablished?: boolean; // exact adaptive-clearance state from the geometry corridor
 }
 
 export type PropulsionMode = 'sail' | 'motor' | 'wait';

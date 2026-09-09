@@ -268,6 +268,7 @@ function motorRouteAlongCorridor(
       legCalcMs: 0,
       waveHeight,
       gribFilePath: wind.getFilePathForPoint(point.lat, point.lon, timeIndex),
+      shoreClearanceEstablished: point.shoreClearanceEstablished,
     });
   }
   return route;

@@ -133,17 +133,18 @@ export function assessRouteQuality(route: RoutePoint[], context: RouteQualityCon
   let maneuverCount = 0;
   let lowHeadwayManeuverCount = 0;
   let shoreClearanceEstablished =
-    context.navigationConstraints.minimumShoreDistanceNm <= 0 ||
-    (!!context.shorelineIndex &&
-      !!route[0] &&
-      segmentHasShoreClearance(
-        context.shorelineIndex,
-        route[0].lat,
-        route[0].lon,
-        route[0].lat,
-        route[0].lon,
-        context.navigationConstraints.minimumShoreDistanceNm,
-      ));
+    route[0]?.shoreClearanceEstablished ??
+    (context.navigationConstraints.minimumShoreDistanceNm <= 0 ||
+      (!!context.shorelineIndex &&
+        !!route[0] &&
+        segmentHasShoreClearance(
+          context.shorelineIndex,
+          route[0].lat,
+          route[0].lon,
+          route[0].lat,
+          route[0].lon,
+          context.navigationConstraints.minimumShoreDistanceNm,
+        )));
 
   if (route.length < 2) add('too-few-points', 'error', 'Route has fewer than two points.');
 
@@ -220,7 +221,9 @@ export function assessRouteQuality(route: RoutePoint[], context: RouteQualityCon
         minimumObservedDepthM = Math.min(minimumObservedDepthM ?? legMinimum, legMinimum);
       }
     }
-    if (
+    if (point.shoreClearanceEstablished !== undefined) {
+      shoreClearanceEstablished = point.shoreClearanceEstablished;
+    } else if (
       !shoreClearanceEstablished &&
       context.shorelineIndex &&
       context.navigationConstraints.minimumShoreDistanceNm > 0 &&
