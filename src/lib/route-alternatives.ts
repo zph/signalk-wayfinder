@@ -23,10 +23,12 @@ export function planAlternativeSearch(
       attempt,
       options: {
         ...optionsForAlternative(base, objective, attempt, requestedCount),
+        // Production routing is always bounded: first find a goal-directed chart corridor, then
+        // refine inside it. Callers cannot opt back into the exhaustive isochrone path.
+        coarseToFine: true,
         ...(shared
           ? {
               sharedAlternativeCount: requestedCount,
-              coarseToFine: base.coarseToFine !== false,
             }
           : {}),
       },

@@ -84,9 +84,9 @@ import {
   polarPerformanceBaseUrl,
 } from './lib/polar-performance-client';
 
-const ALGORITHMS: Map<string, RoutingAlgorithm> = new Map([['isochrone', new IsochroneAlgorithm()]]);
+const ALGORITHMS: Map<string, RoutingAlgorithm> = new Map([['corridor', new IsochroneAlgorithm()]]);
 
-const DEFAULT_ALGORITHM = 'isochrone';
+const DEFAULT_ALGORITHM = 'corridor';
 
 module.exports = (app: SignalKApp) => {
   let gribFiles: GribFileEntry[] = [];
@@ -656,7 +656,9 @@ module.exports = (app: SignalKApp) => {
         const waypoints: Array<LatLon> = Array.isArray(req.body?.waypoints) ? req.body.waypoints : [];
         const points: Array<LatLon> = [start, ...waypoints, end];
 
-        const algorithmId: string = settings?.algorithm ?? DEFAULT_ALGORITHM;
+        // Migrate the former exhaustive-router setting to the only supported bounded engine.
+        const algorithmId: string =
+          !settings?.algorithm || settings.algorithm === 'isochrone' ? DEFAULT_ALGORITHM : settings.algorithm;
         const algorithm = ALGORITHMS.get(algorithmId);
         if (!algorithm) {
           return void res.status(400).json({ error: `Unknown algorithm: ${algorithmId}` });

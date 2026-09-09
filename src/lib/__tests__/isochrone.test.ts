@@ -84,8 +84,9 @@ function makePolar(): PolarData {
 
 const algo = new IsochroneAlgorithm();
 
-test('IsochroneAlgorithm.id is "isochrone"', () => {
-  assert.strictEqual(algo.id, 'isochrone');
+test('production algorithm identifies itself as the goal-directed corridor router', () => {
+  assert.strictEqual(algo.id, 'corridor');
+  assert.strictEqual(algo.name, 'Goal-directed corridor');
 });
 
 test('calculate: forced motor refines long forecast steps instead of overshooting a short route', async () => {
@@ -383,7 +384,7 @@ test('calculate: coarse-to-fine shared search preserves arrival quality and alte
   );
 });
 
-test('calculate: coarse-to-fine falls back when the coarse heading lattice misses the route', async () => {
+test('calculate: bounded corridor search reaches a direct route without exhaustive fallback', async () => {
   const times = hourlyTimes('2024-01-01T00:00:00Z', 8);
   const request: CalculationRequest = {
     start: { lat: 41, lon: 11 },
@@ -394,8 +395,6 @@ test('calculate: coarse-to-fine falls back when the coarse heading lattice misse
     arrivalRadiusNm: 1,
     sharedAlternativeCount: 3,
     coarseToFine: true,
-    coarseHeadingStep: 360,
-    coarseSectorSize: 360,
   });
   assert.equal(result.route.at(-1)?.lat, request.end.lat);
   assert.equal(result.route.at(-1)?.lon, request.end.lon);

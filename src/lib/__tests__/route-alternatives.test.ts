@@ -86,20 +86,21 @@ test('configures objective-specific propulsion and distinct heading offsets', ()
   });
 });
 
-test('plans one shared search for direct alternatives and preserves repeated fallback', () => {
+test('forces bounded corridor search for shared and repeated alternatives', () => {
   const shared = planAlternativeSearch({ headingStep: 5 }, 'fastest', 10, true);
   assert.equal(shared.shared, true);
   assert.equal(shared.tasks.length, 1);
   assert.equal(shared.tasks[0].options.sharedAlternativeCount, 10);
   assert.equal(shared.tasks[0].options.coarseToFine, true);
 
-  const exact = planAlternativeSearch({ headingStep: 5, coarseToFine: false }, 'fastest', 10, true);
-  assert.equal(exact.tasks[0].options.coarseToFine, false);
+  const attemptedExhaustive = planAlternativeSearch({ headingStep: 5, coarseToFine: false }, 'fastest', 10, true);
+  assert.equal(attemptedExhaustive.tasks[0].options.coarseToFine, true);
 
   const repeated = planAlternativeSearch({ headingStep: 5 }, 'fastest', 5, false);
   assert.equal(repeated.shared, false);
   assert.equal(repeated.tasks.length, 10);
   assert.equal(repeated.tasks[1].options.headingOffsetDeg, 0.5);
+  assert.ok(repeated.tasks.every((task) => task.options.coarseToFine === true));
 });
 
 test('fastest ranks complete routes by duration and removes duplicate geometry', () => {

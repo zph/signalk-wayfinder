@@ -37,6 +37,7 @@ import {
   type NavigationConstraints,
 } from '../navigation-safety';
 import { NodeRoutingPhaseProfiler } from './node-phase-profiler';
+import { buildGoalDirectedCorridor, type GoalCorridorPoint } from './goal-corridor';
 
 const DEFAULT_HEADING_STEP = 5;
 const DEFAULT_SECTOR_SIZE = 1;
@@ -54,15 +55,12 @@ const FINE_PASS_CONE_HALF_ANGLE = 100;
 const CONE_DISABLE_LOOKAHEAD_NM = 100;
 const MAX_HEADING_CHANGE = 120;
 const MIN_SHARED_ALTERNATIVE_SEPARATION_NM = 0.25;
-const DEFAULT_COARSE_HEADING_STEP = 10;
-const DEFAULT_COARSE_SECTOR_SIZE = 2;
-const DEFAULT_CORRIDOR_WIDTH_NM = 30;
+// The weather/polar pass may adjust locally around the chart-safe A* path, but it may not expand
+// into a coast-wide isochrone. Six nautical miles leaves room for tactical weather choices while
+// keeping work proportional to route length.
+const DEFAULT_CORRIDOR_WIDTH_NM = 6;
 const MAX_POLAR_HEADING_CACHE_ENTRIES = 128;
 const MIN_ADAPTIVE_HEADING_ROUTE_NM = 250;
-
-interface RoutingCorridorPoint extends LatLon {
-  timeMs: number;
-}
 
 class FrontierAccumulator<T extends { lat: number; lon: number }> {
   candidateCount = 0;
@@ -174,32 +172,32 @@ class FrontierAccumulator<T extends { lat: number; lon: number }> {
   }
 }
 
-function routingCorridor(value: unknown): RoutingCorridorPoint[] | null {
+function routingCorridor(value: unknown): GoalCorridorPoint[] | null {
   if (!Array.isArray(value) || value.length < 2) return null;
   const points = value.filter(
-    (point): point is RoutingCorridorPoint =>
+    (point): point is GoalCorridorPoint =>
       typeof point === 'object' &&
       point !== null &&
-      Number.isFinite((point as RoutingCorridorPoint).lat) &&
-      Number.isFinite((point as RoutingCorridorPoint).lon) &&
-      Number.isFinite((point as RoutingCorridorPoint).timeMs),
+      Number.isFinite((point as GoalCorridorPoint).lat) &&
+      Number.isFinite((point as GoalCorridorPoint).lon) &&
+      Number.isFinite((point as GoalCorridorPoint).timeMs),
   );
   return points.length >= 2 ? points : null;
 }
 
-function routingCorridors(options: Record<string, unknown> | undefined): RoutingCorridorPoint[][] {
+function routingCorridors(options: Record<string, unknown> | undefined): GoalCorridorPoint[][] {
   const multiple = options?._routingCorridors;
   if (Array.isArray(multiple)) {
     const corridors = multiple
       .map(routingCorridor)
-      .filter((corridor): corridor is RoutingCorridorPoint[] => !!corridor);
+      .filter((corridor): corridor is GoalCorridorPoint[] => !!corridor);
     if (corridors.length > 0) return corridors;
   }
   const single = routingCorridor(options?._routingCorridor);
   return single ? [single] : [];
 }
 
-function prepareCorridorAnchors(times: Date[], corridor: RoutingCorridorPoint[] | null): Array<LatLon | null> {
+function prepareCorridorAnchors(times: Date[], corridor: GoalCorridorPoint[] | null): Array<LatLon | null> {
   if (!corridor) return times.map(() => null);
   let corridorIndex = 0;
   return times.map((time) => {
@@ -212,18 +210,6 @@ function prepareCorridorAnchors(times: Date[], corridor: RoutingCorridorPoint[] 
     }
     return corridor[corridorIndex];
   });
-}
-
-function maximumPathSeparationNm(a: RoutePoint[], b: RoutePoint[]): number {
-  const samples = Math.min(24, Math.max(2, Math.min(a.length, b.length)));
-  let maximum = 0;
-  for (let sample = 1; sample < samples - 1; sample++) {
-    const fraction = sample / (samples - 1);
-    const pointA = a[Math.round(fraction * (a.length - 1))];
-    const pointB = b[Math.round(fraction * (b.length - 1))];
-    maximum = Math.max(maximum, haversineNM(pointA.lat, pointA.lon, pointB.lat, pointB.lon));
-  }
-  return maximum;
 }
 
 interface StepTiming {
@@ -289,8 +275,8 @@ export class RoutingError extends Error {
 }
 
 export class IsochroneAlgorithm implements RoutingAlgorithm {
-  readonly id = 'isochrone';
-  readonly name = 'Isochrone';
+  readonly id = 'corridor';
+  readonly name = 'Goal-directed corridor';
 
   async calculate(
     wind: WindProvider,
@@ -360,88 +346,25 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
       Math.min(10, Math.trunc(Number(options?.sharedAlternativeCount ?? 1))),
     );
     if (options?.coarseToFine === true && routingCorridors(options).length === 0) {
-      const coarseHeadingStep = Math.max(
-        Number(options?.headingStep ?? DEFAULT_HEADING_STEP),
-        Number(options?.coarseHeadingStep ?? DEFAULT_COARSE_HEADING_STEP),
-      );
-      const coarseSectorSize = Math.max(
-        Number(options?.sectorSize ?? DEFAULT_SECTOR_SIZE),
-        Number(options?.coarseSectorSize ?? DEFAULT_COARSE_SECTOR_SIZE),
-      );
-      const requestedCoarseCorridors = Number(options?.coarseCorridorCount ?? Math.min(requestedSharedAlternatives, 4));
-      const coarseCorridorCount = Math.max(
-        1,
-        Math.min(
-          requestedSharedAlternatives,
-          Number.isFinite(requestedCoarseCorridors) ? Math.trunc(requestedCoarseCorridors) : 1,
-        ),
-      );
-      try {
-        const coarse = await this.calculate(
-          wind,
-          current,
-          polar,
-          edgeIndex,
-          regionIndex,
-          request,
-          (percent, frontier) => onProgress(percent * 0.15, frontier),
-          {
-            ...options,
-            headingStep: coarseHeadingStep,
-            sectorSize: coarseSectorSize,
-            sharedAlternativeCount: coarseCorridorCount,
-            coarseToFine: false,
-            _profileStage: 'coarse',
+      const corridor = buildGoalDirectedCorridor(
+        edgeIndex,
+        regionIndex,
+        request,
+        navigationSafety,
+        {
+          gridStepNm: Number(options?.corridorGridStepNm ?? NaN) || undefined,
+          maximumExpansions: Number(options?.maximumCorridorExpansions ?? NaN) || undefined,
+          maximumDetourFactor: Number(options?.maximumCorridorDetourFactor ?? NaN) || undefined,
+          planningSpeedKn: Number(options?.motorSpeedKn ?? options?.corridorPlanningSpeedKn ?? 5),
+          constraints: {
+            minimumDepthM: 0,
+            minimumShoreDistanceNm: Number(options?.minimumShoreDistanceNm ?? 0),
+            maximumOffshoreDistanceNm: Number(options?.maximumOffshoreDistanceNm ?? 0),
           },
-          navigationSafety,
-        );
-        const coarseEnd = coarse.route.at(-1);
-        if (!coarse.warning && coarseEnd?.lat === request.end.lat && coarseEnd.lon === request.end.lon) {
-          const coarseCandidates = coarse.alternatives ?? [coarse.route];
-          const coarseRoutes = [coarseCandidates[0]];
-          const minimumCorridorSeparationNm = Math.max(
-            2,
-            Math.min(10, Number(options?.corridorWidthNm ?? DEFAULT_CORRIDOR_WIDTH_NM) * 0.25),
-          );
-          for (const candidate of coarseCandidates.slice(1)) {
-            if (coarseRoutes.length >= coarseCorridorCount) break;
-            if (
-              coarseRoutes.every(
-                (selected) => maximumPathSeparationNm(selected, candidate) >= minimumCorridorSeparationNm,
-              )
-            )
-              coarseRoutes.push(candidate);
-          }
-          const fine = await this.calculate(
-            wind,
-            current,
-            polar,
-            edgeIndex,
-            regionIndex,
-            request,
-            (percent, frontier) => onProgress(15 + percent * 0.85, frontier),
-            {
-              ...options,
-              coarseToFine: false,
-              sharedAlternativeCount: requestedSharedAlternatives,
-              _profileStage: 'fine',
-              _routingCorridors: coarseRoutes.map((route) =>
-                route.map((point) => ({
-                  lat: point.lat,
-                  lon: point.lon,
-                  timeMs: point.time.getTime(),
-                })),
-              ),
-            },
-            navigationSafety,
-          );
-          const fineEnd = fine.route.at(-1);
-          if (!fine.warning && fineEnd?.lat === request.end.lat && fineEnd.lon === request.end.lon) return fine;
-        }
-      } catch {
-        // The approximation may fail even when the full-resolution search can find a route.
-      }
-      return this.calculate(
+        },
+        onProgress,
+      );
+      const fine = await this.calculate(
         wind,
         current,
         polar,
@@ -453,10 +376,16 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
           ...options,
           coarseToFine: false,
           sharedAlternativeCount: requestedSharedAlternatives,
-          _profileStage: 'full-fallback',
+          _profileStage: 'corridor-refinement',
+          _routingCorridors: [corridor],
         },
         navigationSafety,
       );
+      const fineEnd = fine.route.at(-1);
+      if (fine.warning || fineEnd?.lat !== request.end.lat || fineEnd.lon !== request.end.lon) {
+        throw new RoutingError('Bounded corridor refinement did not reach the destination', 'land');
+      }
+      return fine;
     }
     const headingStep = Number(options?.headingStep ?? DEFAULT_HEADING_STEP);
     const sectorSize = Number(options?.sectorSize ?? DEFAULT_SECTOR_SIZE);
