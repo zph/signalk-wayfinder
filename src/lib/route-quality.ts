@@ -341,17 +341,22 @@ export function assessRouteQuality(route: RoutePoint[], context: RouteQualityCon
       );
     }
     if (point.boatSpeed !== undefined && point.boatSpeed > 0) {
-      const polarSpeed = interpolateBoatSpeed(context.polar, point.twa, point.tws);
+      // The isochrone advances each leg with wind sampled at its departure point.
+      // Waypoint wind is subsequently resampled at the waypoint itself for display,
+      // so comparing the stored leg speed with the arrival sample creates false
+      // mismatches whenever conditions change across the leg.
+      const departureTwa = trueWindAngle(point.heading, previous.windDir);
+      const polarSpeed = interpolateBoatSpeed(context.polar, departureTwa, previous.tws);
       const motoring =
         point.propulsion === 'motor' ||
         (context.motorBelowKn > 0 &&
           context.motorSpeedKn > 0 &&
           Math.abs(point.boatSpeed - context.motorSpeedKn) <= 0.2);
-      if (!motoring && point.twa < context.polar.twa[0]) {
+      if (!motoring && departureTwa < context.polar.twa[0]) {
         add(
           'polar-no-go-angle',
           'warning',
-          'A moving leg falls inside the polar table no-go angle after waypoint wind resampling.',
+          'A moving leg falls inside the polar table no-go angle at its departure conditions.',
         );
       }
       const speedTolerance = Math.max(0.75, polarSpeed * 0.25);
@@ -359,7 +364,7 @@ export function assessRouteQuality(route: RoutePoint[], context: RouteQualityCon
         add(
           'polar-speed-mismatch',
           'warning',
-          'A leg speed differs materially from the polar prediction at its displayed waypoint conditions.',
+          'A leg speed differs materially from the polar prediction at its departure conditions.',
         );
       }
     }

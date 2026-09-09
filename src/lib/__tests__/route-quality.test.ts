@@ -127,6 +127,33 @@ test('fails a route whose TWA disagrees with heading and resampled wind directio
   assert.ok(report.issues.some((issue) => issue.code === 'twa-mismatch' && issue.severity === 'error'));
 });
 
+test('checks sailing speed against leg-departure wind instead of resampled arrival wind', () => {
+  const route = validRoute();
+  route[0].tws = 10;
+  route[0].windDir = 180;
+  route[1].tws = 20;
+  route[1].windDir = 180;
+  route[1].twa = 90;
+  route[1].boatSpeed = 41 / 7;
+  route[1].propulsion = 'sail';
+
+  const report = assessRouteQuality(route, context());
+
+  assert.equal(report.valid, true);
+  assert.ok(!report.issues.some((issue) => issue.code === 'polar-speed-mismatch'));
+});
+
+test('warns when sailing speed disagrees with the polar at leg departure', () => {
+  const route = validRoute();
+  route[1].boatSpeed = 2;
+  route[1].propulsion = 'sail';
+
+  const report = assessRouteQuality(route, context());
+
+  assert.equal(report.valid, true);
+  assert.ok(report.issues.some((issue) => issue.code === 'polar-speed-mismatch'));
+});
+
 test('records repeated low-headway tacks for alternative scoring without rejecting them', () => {
   const route = [
     point({ heading: 0, twa: 0, boatSpeed: undefined }),
