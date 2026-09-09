@@ -400,6 +400,40 @@ test('calculate: bounded corridor search reaches a direct route without exhausti
   assert.equal(result.route.at(-1)?.lon, request.end.lon);
 });
 
+test('calculate: all-motoring traverses the bounded corridor without a sailing frontier', async () => {
+  const times = hourlyTimes('2024-01-01T00:00:00Z', 8);
+  const request: CalculationRequest = {
+    start: { lat: 41, lon: 11 },
+    end: { lat: 41, lon: 11.2 },
+    departureTime: times[0].toISOString(),
+  };
+  const progress: number[] = [];
+  const result = await algo.calculate(
+    makeWind(makeGrib(times)),
+    null,
+    makePolar(),
+    null,
+    null,
+    request,
+    (percent) => progress.push(percent),
+    { coarseToFine: true, forceMotor: true, motorSpeedKn: 5 },
+  );
+  assert.equal(result.route.at(-1)?.lat, request.end.lat);
+  assert.equal(result.route.at(-1)?.lon, request.end.lon);
+  assert.ok(result.route.slice(1).every((point) => point.propulsion === 'motor'));
+  assert.equal(progress.at(-1), 100);
+  const elapsedHours =
+    (result.route.at(-1)!.time.getTime() - result.route[0].time.getTime()) / 3_600_000;
+  const routeDistanceNm = result.route
+    .slice(1)
+    .reduce(
+      (sum, point, index) =>
+        sum + haversineNM(result.route[index].lat, result.route[index].lon, point.lat, point.lon),
+      0,
+    );
+  assert.ok(Math.abs(elapsedHours - routeDistanceNm / 5) < 0.001);
+});
+
 test('calculate: multiple coarse corridors preserve obstacle routing quality', async () => {
   const times = hourlyTimes('2024-01-01T00:00:00Z', 37);
   const request: CalculationRequest = {

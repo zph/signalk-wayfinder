@@ -212,6 +212,67 @@ function prepareCorridorAnchors(times: Date[], corridor: GoalCorridorPoint[] | n
   });
 }
 
+function motorRouteAlongCorridor(
+  corridor: GoalCorridorPoint[],
+  wind: WindProvider,
+  current: CurrentProvider | null,
+  motorSpeedKn: number,
+  maxWindKn: number,
+  maxWaveM: number,
+): RoutePoint[] {
+  const route: RoutePoint[] = [];
+  let time = new Date(corridor[0].timeMs);
+  for (let index = 0; index < corridor.length; index++) {
+    const point = corridor[index];
+    const previous = index > 0 ? corridor[index - 1] : undefined;
+    const next = corridor[index + 1];
+    const heading = previous
+      ? bearingTo(previous.lat, previous.lon, point.lat, point.lon)
+      : next
+        ? bearingTo(point.lat, point.lon, next.lat, next.lon)
+        : 0;
+    if (previous) {
+      const flow = current?.getCurrent(previous.lat, previous.lon, time) ?? { u: 0, v: 0 };
+      const headingRad = heading * DEG_TO_RAD;
+      const alongTrackCurrentKn = (flow.u * Math.sin(headingRad) + flow.v * Math.cos(headingRad)) * 1.94384;
+      const speedOverGroundKn = Math.max(0.3, motorSpeedKn + alongTrackCurrentKn);
+      time = new Date(
+        time.getTime() +
+          (haversineNM(previous.lat, previous.lon, point.lat, point.lon) / speedOverGroundKn) * 3_600_000,
+      );
+    }
+    const timeIndex = nearestIdx(wind.times, time);
+    if (!wind.coversPointAtTime(point.lat, point.lon, timeIndex) || time > wind.times.at(-1)!) {
+      throw new RoutingError('Bounded motor corridor extends beyond forecast coverage', 'grib_exhausted');
+    }
+    const sampledWind = wind.getWind(point.lat, point.lon, timeIndex);
+    const windDir = windDirection(sampledWind.u, sampledWind.v);
+    const tws = windSpeedKnots(sampledWind.u, sampledWind.v);
+    const waveHeight = wind.getWave(point.lat, point.lon, time);
+    if (maxWindKn > 0 && tws > maxWindKn) {
+      throw new RoutingError(`Bounded motor corridor exceeds maximum wind (${tws.toFixed(1)} kn)`, 'wind');
+    }
+    if (maxWaveM > 0 && waveHeight !== undefined && waveHeight > maxWaveM) {
+      throw new RoutingError(`Bounded motor corridor exceeds maximum wave height (${waveHeight.toFixed(1)} m)`, 'wind');
+    }
+    route.push({
+      lat: point.lat,
+      lon: point.lon,
+      time,
+      heading,
+      twa: index === 0 ? 0 : trueWindAngle(heading, windDir),
+      tws,
+      boatSpeed: index === 0 ? undefined : motorSpeedKn,
+      propulsion: index === 0 ? undefined : 'motor',
+      windDir,
+      legCalcMs: 0,
+      waveHeight,
+      gribFilePath: wind.getFilePathForPoint(point.lat, point.lon, timeIndex),
+    });
+  }
+  return route;
+}
+
 interface StepTiming {
   step: number;
   frontierSize: number;
@@ -365,6 +426,22 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
         onProgress,
       );
       const clearanceActivationTimeMs = corridor.find((point) => point.shoreClearanceEstablished)?.timeMs;
+      const forceMotor = options?.forceMotor === true;
+      const motorSpeedKn = Number(options?.motorSpeedKn ?? 0);
+      const daylightOnly = options?.daylightOnly === true;
+      const maxHoursPerDay = Number(options?.maxHoursPerDay ?? 0);
+      if (forceMotor && motorSpeedKn > 0 && !daylightOnly && !(maxHoursPerDay > 0)) {
+        const route = motorRouteAlongCorridor(
+          corridor,
+          wind,
+          current,
+          motorSpeedKn,
+          Number(options?.maxWindKn ?? 0),
+          Number(options?.maxWaveM ?? 0),
+        );
+        onProgress(100, route.map((point) => [point.lat, point.lon]));
+        return { route };
+      }
       const fine = await this.calculate(
         wind,
         current,
