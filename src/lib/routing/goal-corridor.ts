@@ -140,17 +140,12 @@ export function buildGoalDirectedCorridor(
   const avoidIds = new Set(Array.isArray(request.avoidRegionIds) ? request.avoidRegionIds : []);
   const shorelineIndex = navigationSafety?.shorelineIndex ?? edgeIndex;
   const minimumShoreDistanceNm = options.constraints.minimumShoreDistanceNm;
-  const departureClearanceEstablished =
-    !(minimumShoreDistanceNm > 0) ||
-    !!shorelineIndex &&
-      segmentHasShoreClearance(
-        shorelineIndex,
-        request.start.lat,
-        request.start.lon,
-        request.start.lat,
-        request.start.lon,
-        minimumShoreDistanceNm,
-      );
+  // A locally wide departure does not prove the entire harbor or bay exit can sustain the
+  // requested offshore clearance. Begin in the reversible narrow-water state and preserve both
+  // branches whenever full clearance is available. The weighted search prefers the committed
+  // branch, while the narrow branch remains able to pass a later channel pinch before committing
+  // in genuinely open water.
+  const departureClearanceEstablished = !(minimumShoreDistanceNm > 0);
   const start: SearchNode = {
     ...request.start,
     ix: 0,

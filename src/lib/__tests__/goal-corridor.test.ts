@@ -93,6 +93,39 @@ test('goal-directed corridor escapes a narrow charted entrance before enforcing 
   }
 });
 
+test('goal-directed corridor preserves a narrow branch when a later channel pinches', () => {
+  const land = buildLandEdgeIndex([
+    rectangle(-0.01, 0.003, 0.015, 0.02),
+    rectangle(-0.01, -0.02, 0.015, -0.003),
+    rectangle(0.015, 0.0008, 0.03, 0.02),
+    rectangle(0.015, -0.02, 0.03, -0.0008),
+  ]);
+  const request: CalculationRequest = {
+    start: { lat: 0, lon: 0 },
+    end: { lat: 0, lon: 0.045 },
+    departureTime,
+  };
+  const corridor = buildGoalDirectedCorridor(
+    land,
+    null,
+    request,
+    { shorelineIndex: land, depthProvider: null },
+    {
+      constraints: { ...constraints, minimumShoreDistanceNm: 0.1 },
+      gridStepNm: 0.02,
+      maximumExpansions: 20_000,
+    },
+    () => {},
+  );
+  assert.equal(corridor[0].shoreClearanceEstablished, false);
+  assert.ok(corridor.some((point) => point.lon > 0.03 && point.shoreClearanceEstablished));
+  for (let index = 1; index < corridor.length; index++) {
+    const previous = corridor[index - 1];
+    const point = corridor[index];
+    assert.equal(segmentCrossesLandFast(land, previous.lat, previous.lon, point.lat, point.lon), false);
+  }
+});
+
 test('goal-directed corridor fails at its hard expansion budget instead of falling back', () => {
   const land = buildLandEdgeIndex([rectangle(-122.5, 37.7, -122.1, 37.95)]);
   const request: CalculationRequest = {

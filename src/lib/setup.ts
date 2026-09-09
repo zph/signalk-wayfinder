@@ -56,6 +56,7 @@ function highResolutionDataDir(dataDir: string): string {
 //   edge grid: per cell → u32LE key + u32LE n + n×u32LE entries
 //   poly grid: per cell → u32LE key + u32LE n + n×u32LE indices
 function parseIndexBuffer(buf: Buffer): LandEdgeIndex {
+  const version = buf.readUInt32LE(4);
   const nPolygons = buf.readUInt32LE(16);
   const nEdgeCells = buf.readUInt32LE(20);
   const nPolyCells = buf.readUInt32LE(24);
@@ -67,14 +68,19 @@ function parseIndexBuffer(buf: Buffer): LandEdgeIndex {
     const bboxLatMax = buf.readDoubleBE(off + 8);
     const bboxLonMin = buf.readDoubleBE(off + 16);
     const bboxLonMax = buf.readDoubleBE(off + 24);
-    const nRings = buf.readUInt32LE(off + 32);
+    const count = buf.readUInt32LE(off + 32);
     off += 40;
     const rings: Float64Array[] = [];
-    for (let ringIndex = 0; ringIndex < nRings; ringIndex++) {
-      const nFloats = buf.readUInt32LE(off);
-      off += 8;
-      rings.push(new Float64Array(buf.buffer, buf.byteOffset + off, nFloats));
-      off += nFloats * 8;
+    if (version === 2) {
+      rings.push(new Float64Array(buf.buffer, buf.byteOffset + off, count));
+      off += count * 8;
+    } else {
+      for (let ringIndex = 0; ringIndex < count; ringIndex++) {
+        const nFloats = buf.readUInt32LE(off);
+        off += 8;
+        rings.push(new Float64Array(buf.buffer, buf.byteOffset + off, nFloats));
+        off += nFloats * 8;
+      }
     }
     const [exterior, ...interiors] = rings;
     if (!exterior) throw new Error(`Land polygon ${i} has no exterior ring`);
@@ -113,7 +119,8 @@ function extractAndLoad(bundledGz: string, cachePath: string, magic: number, ver
     try {
       const buf = fs.readFileSync(cachePath);
       // Magic guards against corrupt or wrong-format files; version bump invalidates caches written by older index formats.
-      if (buf.length >= 8 && buf.readUInt32LE(0) === magic && buf.readUInt32LE(4) === version) {
+      const cachedVersion = buf.length >= 8 ? buf.readUInt32LE(4) : 0;
+      if (buf.length >= 8 && buf.readUInt32LE(0) === magic && (cachedVersion === version || cachedVersion === 2)) {
         return parseIndexBuffer(buf);
       }
     } catch {
@@ -127,6 +134,10 @@ function extractAndLoad(bundledGz: string, cachePath: string, magic: number, ver
 
   const gz = fs.readFileSync(bundledGz);
   const buf = zlib.gunzipSync(gz);
+  const bundledVersion = buf.length >= 8 ? buf.readUInt32LE(4) : 0;
+  if (buf.readUInt32LE(0) !== magic || (bundledVersion !== version && bundledVersion !== 2)) {
+    throw new Error(`Unsupported land index format in ${bundledGz}`);
+  }
   fs.mkdirSync(path.dirname(cachePath), { recursive: true });
   fs.writeFileSync(cachePath, buf);
   return parseIndexBuffer(buf);
