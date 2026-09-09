@@ -192,10 +192,11 @@ export function assessRouteQuality(route: RoutePoint[], context: RouteQualityCon
       point.lat,
       point.lon,
       context.end
-        ? {
+          ? {
             start: context.start,
             end: context.end,
             departureClearanceEstablished: shoreClearanceEstablished,
+            departureMinimumDistanceNm: 0,
           }
         : undefined,
     );

@@ -166,6 +166,44 @@ test('fails a route leg that crosses the configured shoreline mask', () => {
   assert.ok(report.issues.some((issue) => issue.code === 'land-crossing'));
 });
 
+test('accepts a land-safe route through a narrow departure before full clearance', () => {
+  const land = buildLandEdgeIndex([
+    {
+      bboxLatMin: 58.6004,
+      bboxLatMax: 58.62,
+      bboxLonMin: 18.99,
+      bboxLonMax: 19.05,
+      exterior: new Float64Array([18.99, 58.6004, 19.05, 58.6004, 19.05, 58.62, 18.99, 58.62]),
+    },
+    {
+      bboxLatMin: 58.58,
+      bboxLatMax: 58.5996,
+      bboxLonMin: 18.99,
+      bboxLonMax: 19.05,
+      exterior: new Float64Array([18.99, 58.58, 19.05, 58.58, 19.05, 58.5996, 18.99, 58.5996]),
+    },
+  ]);
+  const route = [
+    point({ heading: 0, twa: 0, boatSpeed: undefined }),
+    point({ lon: 19.02, time: new Date('2026-06-06T07:00:00Z') }),
+    point({ lon: 19.1, time: new Date('2026-06-06T08:00:00Z') }),
+  ];
+  const report = assessRouteQuality(
+    route,
+    context({
+      landIndex: land,
+      shorelineIndex: land,
+      navigationConstraints: {
+        minimumDepthM: 0,
+        minimumShoreDistanceNm: 0.1,
+        maximumOffshoreDistanceNm: 0,
+      },
+    }),
+  );
+  assert.equal(report.valid, true);
+  assert.ok(!report.issues.some((issue) => issue.code === 'shore-clearance-violated'));
+});
+
 test('warns when route conditions exceed forecast and polar confidence ranges', () => {
   const route = validRoute();
   route[1].time = new Date('2026-06-10T12:00:00Z');
