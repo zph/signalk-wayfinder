@@ -52,8 +52,10 @@ function quality(overrides: Partial<RouteQualityReport['metrics']> = {}): RouteQ
       minimumObservedDepthM: null,
       motorHours: 0,
       averageWaveHeightM: 1,
+      p95WaveHeightM: 1.4,
       maximumWaveHeightM: 1.5,
       averageWindKn: 13,
+      p95WindKn: 13.8,
       maximumWindKn: 14,
       ...overrides,
     },
@@ -160,6 +162,19 @@ test('best-weather ranks calmer waves and winds before duration', () => {
   );
   assert.equal(ranked[0].summary.averageWaveHeightM, 0.7);
   assert.equal(ranked[0].summary.durationHours, 8);
+});
+
+test('best-weather uses P95 exposure to distinguish equal averages', () => {
+  const ranked = rankDistinctAlternatives(
+    [
+      alternative(19.1, 5, { p95WaveHeightM: 2.5, p95WindKn: 25 }),
+      alternative(19.2, 6, { p95WaveHeightM: 1.4, p95WindKn: 16 }),
+    ],
+    'bestWeather',
+    2,
+  );
+  assert.equal(ranked[0].summary.durationHours, 6);
+  assert.equal(ranked[0].summary.p95WindKn, 16);
 });
 
 test('ranks warning-free routes before objective ties', () => {

@@ -81,8 +81,10 @@ export function summarizeAlternative(
     distanceNm: metrics.totalDistanceNm,
     motorHours: metrics.motorHours,
     averageWaveHeightM: metrics.averageWaveHeightM,
+    p95WaveHeightM: metrics.p95WaveHeightM,
     maximumWaveHeightM: metrics.maximumWaveHeightM,
     averageWindKn: metrics.averageWindKn,
+    p95WindKn: metrics.p95WindKn,
     maximumWindKn: metrics.maximumWindKn,
     ...(alternative.warning ? { warning: alternative.warning } : {}),
     quality: alternative.quality,
@@ -97,8 +99,8 @@ function weatherScore(summary: RouteAlternativeSummary): number {
   const waveScore =
     summary.averageWaveHeightM === null
       ? 0
-      : summary.averageWaveHeightM * 100 + (summary.maximumWaveHeightM ?? summary.averageWaveHeightM) * 30;
-  return waveScore + summary.averageWindKn * 2 + summary.maximumWindKn;
+      : summary.averageWaveHeightM * 100 + (summary.p95WaveHeightM ?? summary.averageWaveHeightM) * 30;
+  return waveScore + summary.averageWindKn * 2 + summary.p95WindKn;
 }
 
 // A normal maneuver costs roughly three minutes in the ranking. A tack or jibe that advances less
@@ -116,8 +118,7 @@ export function compareAlternativeSummaries(a: RouteAlternativeSummary, b: Route
   if (a.objective === 'leastMotoring') {
     return (
       a.motorHours - b.motorHours ||
-      a.durationHours + maneuverPenaltyHours(a) -
-        (b.durationHours + maneuverPenaltyHours(b)) ||
+      a.durationHours + maneuverPenaltyHours(a) - (b.durationHours + maneuverPenaltyHours(b)) ||
       a.distanceNm - b.distanceNm
     );
   }

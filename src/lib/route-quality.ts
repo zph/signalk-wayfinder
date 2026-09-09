@@ -22,6 +22,46 @@ const TWA_TOLERANCE_DEG = 1;
 const ABRUPT_WIND_SHIFT_DEG = 60;
 const MIN_MANEUVER_HEADWAY_NM = 0.5;
 
+interface WeightedSample {
+  value: number;
+  weight: number;
+}
+
+function weightedMean(samples: WeightedSample[]): number | null {
+  const totalWeight = samples.reduce((total, sample) => total + sample.weight, 0);
+  if (totalWeight <= 0) return null;
+  return samples.reduce((total, sample) => total + sample.value * sample.weight, 0) / totalWeight;
+}
+
+function weightedPercentile(samples: WeightedSample[], percentile: number): number | null {
+  const sorted = samples.filter((sample) => sample.weight > 0).sort((a, b) => a.value - b.value);
+  const totalWeight = sorted.reduce((total, sample) => total + sample.weight, 0);
+  if (totalWeight <= 0) return null;
+  const targetWeight = totalWeight * percentile;
+  let accumulatedWeight = 0;
+  for (const sample of sorted) {
+    accumulatedWeight += sample.weight;
+    if (accumulatedWeight >= targetWeight) return sample.value;
+  }
+  return sorted.at(-1)?.value ?? null;
+}
+
+// Give each waypoint half of each adjacent leg's elapsed time. This is the discrete equivalent of
+// integrating linearly sampled route conditions, and prevents short, densely sampled sections from
+// dominating the passage summary.
+function timeWeightedSamples(
+  route: RoutePoint[],
+  valueAt: (point: RoutePoint) => number | undefined,
+): WeightedSample[] {
+  return route.flatMap((point, index) => {
+    const value = valueAt(point);
+    if (value === undefined || !Number.isFinite(value)) return [];
+    const previousMs = index > 0 ? Math.max(0, point.time.getTime() - route[index - 1].time.getTime()) : 0;
+    const nextMs = index + 1 < route.length ? Math.max(0, route[index + 1].time.getTime() - point.time.getTime()) : 0;
+    return [{ value, weight: (previousMs + nextMs) / 7_200_000 }];
+  });
+}
+
 export interface RouteQualityContext {
   start: { lat: number; lon: number };
   end?: { lat: number; lon: number };
@@ -82,11 +122,7 @@ export function assessRouteQuality(route: RoutePoint[], context: RouteQualityCon
   let underwayHoursToday = 0;
   let minimumObservedDepthM: number | null = null;
   let motorHours = 0;
-  let waveHeightTotal = 0;
-  let waveHeightCount = 0;
   let maximumWaveHeightM: number | null = null;
-  let windSpeedTotal = 0;
-  let windSpeedCount = 0;
   let maximumWindKn = 0;
   let previousSailingSide: -1 | 1 | undefined;
   let lastManeuverPoint: RoutePoint | undefined;
@@ -116,17 +152,6 @@ export function assessRouteQuality(route: RoutePoint[], context: RouteQualityCon
     if (point.boatSpeed !== undefined && (!Number.isFinite(point.boatSpeed) || point.boatSpeed < 0)) {
       add('invalid-boat-speed', 'error', `Route point ${i + 1} has an invalid boat speed.`);
     }
-    if (Number.isFinite(point.tws)) {
-      windSpeedTotal += point.tws;
-      windSpeedCount++;
-      maximumWindKn = Math.max(maximumWindKn, point.tws);
-    }
-    if (point.waveHeight !== undefined && Number.isFinite(point.waveHeight)) {
-      waveHeightTotal += point.waveHeight;
-      waveHeightCount++;
-      maximumWaveHeightM = Math.max(maximumWaveHeightM ?? point.waveHeight, point.waveHeight);
-    }
-
     if (context.useLandAvoidance && context.landIndex && isPointOnLand(context.landIndex, point.lat, point.lon)) {
       add('point-on-land', 'error', `Route point ${i + 1} is on the configured shoreline mask.`);
     }
@@ -330,6 +355,14 @@ export function assessRouteQuality(route: RoutePoint[], context: RouteQualityCon
     add('land-check-disabled', 'warning', 'Land avoidance was disabled for this calculation.');
   }
 
+  const windSpeedSamples = timeWeightedSamples(route, (point) => point.tws);
+  const waveHeightSamples = timeWeightedSamples(route, (point) => point.waveHeight);
+  maximumWindKn = windSpeedSamples.reduce((maximum, sample) => Math.max(maximum, sample.value), 0);
+  maximumWaveHeightM =
+    waveHeightSamples.length > 0
+      ? waveHeightSamples.reduce((maximum, sample) => Math.max(maximum, sample.value), -Infinity)
+      : null;
+
   return {
     valid: issues.every((issue) => issue.severity !== 'error'),
     issues,
@@ -343,9 +376,11 @@ export function assessRouteQuality(route: RoutePoint[], context: RouteQualityCon
       passageDays: route.length > 0 ? budgetDayIndex + 1 : 0,
       minimumObservedDepthM,
       motorHours,
-      averageWaveHeightM: waveHeightCount > 0 ? waveHeightTotal / waveHeightCount : null,
+      averageWaveHeightM: weightedMean(waveHeightSamples),
+      p95WaveHeightM: weightedPercentile(waveHeightSamples, 0.95),
       maximumWaveHeightM,
-      averageWindKn: windSpeedCount > 0 ? windSpeedTotal / windSpeedCount : 0,
+      averageWindKn: weightedMean(windSpeedSamples) ?? 0,
+      p95WindKn: weightedPercentile(windSpeedSamples, 0.95) ?? 0,
       maximumWindKn,
       maneuverCount,
       lowHeadwayManeuverCount,

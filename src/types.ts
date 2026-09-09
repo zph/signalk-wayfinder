@@ -195,8 +195,10 @@ export interface RouteAlternativeSummary {
   distanceNm: number;
   motorHours: number;
   averageWaveHeightM: number | null;
+  p95WaveHeightM: number | null;
   maximumWaveHeightM: number | null;
   averageWindKn: number;
+  p95WindKn: number;
   maximumWindKn: number;
   warning?: string;
   quality: RouteQualityReport;
@@ -222,8 +224,10 @@ export interface RouteQualityReport {
     minimumObservedDepthM: number | null;
     motorHours: number;
     averageWaveHeightM: number | null;
+    p95WaveHeightM: number | null;
     maximumWaveHeightM: number | null;
     averageWindKn: number;
+    p95WindKn: number;
     maximumWindKn: number;
     maneuverCount?: number;
     lowHeadwayManeuverCount?: number;

@@ -87,6 +87,7 @@ test('accepts a route whose geometry, time, and displayed wind pattern agree', (
   assert.equal(report.metrics.pointCount, 2);
   assert.ok(report.metrics.totalDistanceNm > 3);
   assert.equal(report.metrics.averageWindKn, 10);
+  assert.equal(report.metrics.p95WindKn, 10);
   assert.equal(report.metrics.maximumWindKn, 10);
 });
 
@@ -98,7 +99,24 @@ test('reports explicit motoring time and wave conditions', () => {
   const report = assessRouteQuality(route, context());
   assert.equal(report.metrics.motorHours, 1);
   assert.equal(report.metrics.averageWaveHeightM, 1);
+  assert.equal(report.metrics.p95WaveHeightM, 1.2);
   assert.equal(report.metrics.maximumWaveHeightM, 1.2);
+});
+
+test('weights average and P95 weather metrics by elapsed route time', () => {
+  const start = point({ heading: 0, twa: 0, boatSpeed: undefined, tws: 10, waveHeight: 1 });
+  const briefPeak = point({ lon: 19.01, tws: 30, waveHeight: 3 });
+  const finish = point({ lon: 19.1, tws: 10, waveHeight: 1 });
+  start.time = new Date('2026-06-06T06:00:00Z');
+  briefPeak.time = new Date('2026-06-06T06:06:00Z');
+  finish.time = new Date('2026-06-06T07:00:00Z');
+
+  const report = assessRouteQuality([start, briefPeak, finish], context({ end: { lat: finish.lat, lon: finish.lon } }));
+
+  assert.equal(report.metrics.averageWindKn, 20);
+  assert.equal(report.metrics.p95WindKn, 30);
+  assert.equal(report.metrics.averageWaveHeightM, 2);
+  assert.equal(report.metrics.p95WaveHeightM, 3);
 });
 
 test('fails a route whose TWA disagrees with heading and resampled wind direction', () => {
