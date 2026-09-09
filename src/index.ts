@@ -223,6 +223,15 @@ module.exports = (app: SignalKApp) => {
     }
     for (const p of paths) {
       try {
+        const cached = cachedWind.get(p) ?? cachedCurrent.get(p);
+        if (cached) {
+          const stat = await fs.stat(p);
+          if (cached.meta.mtime === stat.mtimeMs) {
+            if (cached.meta.type === 'current') currentFiles.push(cached as CurrentFileEntry);
+            else gribFiles.push(cached as GribFileEntry);
+            continue;
+          }
+        }
         const meta = await readGribMeta(p);
         if (meta.type === 'current') {
           const cached = cachedCurrent.get(meta.path);
