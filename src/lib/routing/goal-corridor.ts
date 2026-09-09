@@ -162,11 +162,20 @@ export function buildGoalDirectedCorridor(
   const open = new MinHeap();
   open.push(start);
   const best = new Map<string, number>([[gridKey(0, 0, departureClearanceEstablished), 0]]);
+  const closed = new Set<string>();
   let closestUncommittedNm = departureClearanceEstablished ? Infinity : directNm;
   let closestCommittedNm = departureClearanceEstablished ? directNm : Infinity;
 
-  for (let expansions = 0; open.size > 0 && expansions < maximumExpansions; expansions++) {
+  let expansions = 0;
+  while (open.size > 0 && expansions < maximumExpansions) {
     const current = open.pop();
+    const currentKey = gridKey(current.ix, current.iy, current.clearanceEstablished);
+    // A cell can be queued more than once before its best approach is known. Expand it once;
+    // otherwise near-identical floating-point path costs can consume the entire hard budget in
+    // the departure basin without advancing the frontier.
+    if (closed.has(currentKey)) continue;
+    closed.add(currentKey);
+    expansions++;
     const remainingNm = haversineNM(current.lat, current.lon, request.end.lat, request.end.lon);
     if (current.clearanceEstablished) closestCommittedNm = Math.min(closestCommittedNm, remainingNm);
     else closestUncommittedNm = Math.min(closestUncommittedNm, remainingNm);
@@ -267,6 +276,7 @@ export function buildGoalDirectedCorridor(
           : [false];
       for (const clearanceEstablished of nextStates) {
         const key = gridKey(ix, iy, clearanceEstablished);
+        if (closed.has(key)) continue;
         if ((best.get(key) ?? Infinity) <= nextG) continue;
         best.set(key, nextG);
         const uncommittedPenalty =
