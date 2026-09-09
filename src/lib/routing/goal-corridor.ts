@@ -162,10 +162,14 @@ export function buildGoalDirectedCorridor(
   const open = new MinHeap();
   open.push(start);
   const best = new Map<string, number>([[gridKey(0, 0, departureClearanceEstablished), 0]]);
+  let closestUncommittedNm = departureClearanceEstablished ? Infinity : directNm;
+  let closestCommittedNm = departureClearanceEstablished ? directNm : Infinity;
 
   for (let expansions = 0; open.size > 0 && expansions < maximumExpansions; expansions++) {
     const current = open.pop();
     const remainingNm = haversineNM(current.lat, current.lon, request.end.lat, request.end.lon);
+    if (current.clearanceEstablished) closestCommittedNm = Math.min(closestCommittedNm, remainingNm);
+    else closestUncommittedNm = Math.min(closestUncommittedNm, remainingNm);
     if (remainingNm <= stepNm * 1.5 && (current.clearanceEstablished || !(minimumShoreDistanceNm > 0))) {
       const finalViolation = navigationConstraintViolation(
         shorelineIndex,
@@ -282,5 +286,9 @@ export function buildGoalDirectedCorridor(
       }
     }
   }
-  throw new Error(`No bounded chart-safe corridor found within ${maximumExpansions} A* expansions`);
+  const distance = (value: number): string => (Number.isFinite(value) ? value.toFixed(1) : 'unreached');
+  throw new Error(
+    `No bounded chart-safe corridor found within ${maximumExpansions} A* expansions ` +
+      `(closest narrow state: ${distance(closestUncommittedNm)} nm; full-clearance state: ${distance(closestCommittedNm)} nm)`,
+  );
 }
