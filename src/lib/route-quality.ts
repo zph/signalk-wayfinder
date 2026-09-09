@@ -15,7 +15,11 @@ import { interpolateBoatSpeed } from './polar';
 import { isPointOnLand, segmentCrossesLandFast } from './landmask';
 import { isPointInRegion, segmentCrossesRegion } from './regions';
 import { advanceUnderwayBudget, isLegInDaylight } from './passage-constraints';
-import { navigationConstraintViolation, type NavigationConstraints } from './navigation-safety';
+import {
+  navigationConstraintViolation,
+  segmentHasShoreClearance,
+  type NavigationConstraints,
+} from './navigation-safety';
 
 const ENDPOINT_TOLERANCE_NM = 0.1;
 const TWA_TOLERANCE_DEG = 1;
@@ -128,6 +132,18 @@ export function assessRouteQuality(route: RoutePoint[], context: RouteQualityCon
   let lastManeuverPoint: RoutePoint | undefined;
   let maneuverCount = 0;
   let lowHeadwayManeuverCount = 0;
+  let shoreClearanceEstablished =
+    context.navigationConstraints.minimumShoreDistanceNm <= 0 ||
+    (!!context.shorelineIndex &&
+      !!route[0] &&
+      segmentHasShoreClearance(
+        context.shorelineIndex,
+        route[0].lat,
+        route[0].lon,
+        route[0].lat,
+        route[0].lon,
+        context.navigationConstraints.minimumShoreDistanceNm,
+      ));
 
   if (route.length < 2) add('too-few-points', 'error', 'Route has fewer than two points.');
 
@@ -175,7 +191,13 @@ export function assessRouteQuality(route: RoutePoint[], context: RouteQualityCon
       previous.lon,
       point.lat,
       point.lon,
-      context.end ? { start: context.start, end: context.end } : undefined,
+      context.end
+        ? {
+            start: context.start,
+            end: context.end,
+            departureClearanceEstablished: shoreClearanceEstablished,
+          }
+        : undefined,
     );
     if (safetyViolation === 'depth-unavailable') {
       add('depth-coverage-missing', 'error', `Route leg ${i} has no numeric bathymetry coverage.`);
@@ -196,6 +218,21 @@ export function assessRouteQuality(route: RoutePoint[], context: RouteQualityCon
       if (legMinimum !== undefined) {
         minimumObservedDepthM = Math.min(minimumObservedDepthM ?? legMinimum, legMinimum);
       }
+    }
+    if (
+      !shoreClearanceEstablished &&
+      context.shorelineIndex &&
+      context.navigationConstraints.minimumShoreDistanceNm > 0 &&
+      segmentHasShoreClearance(
+        context.shorelineIndex,
+        point.lat,
+        point.lon,
+        point.lat,
+        point.lon,
+        context.navigationConstraints.minimumShoreDistanceNm,
+      )
+    ) {
+      shoreClearanceEstablished = true;
     }
     const elapsedMs = point.time.getTime() - previous.time.getTime();
     if (elapsedMs < 0) add('time-reversal', 'error', `Route time moves backward on leg ${i}.`);
@@ -353,6 +390,13 @@ export function assessRouteQuality(route: RoutePoint[], context: RouteQualityCon
   }
   if (!context.useLandAvoidance) {
     add('land-check-disabled', 'warning', 'Land avoidance was disabled for this calculation.');
+  }
+  if (context.navigationConstraints.minimumShoreDistanceNm > 0 && !shoreClearanceEstablished) {
+    add(
+      'shore-clearance-not-established',
+      'warning',
+      'The route never reaches the configured open-water shoreline clearance.',
+    );
   }
 
   const windSpeedSamples = timeWeightedSamples(route, (point) => point.tws);

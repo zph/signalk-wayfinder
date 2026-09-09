@@ -31,7 +31,11 @@ import {
 } from '../geo';
 import { withMaximumTimeStep } from '../windprovider';
 import { advanceUnderwayBudget, isLegInDaylight, passageDayIndex, solarElevationDeg } from '../passage-constraints';
-import { navigationConstraintViolation, type NavigationConstraints } from '../navigation-safety';
+import {
+  navigationConstraintViolation,
+  segmentHasShoreClearance,
+  type NavigationConstraints,
+} from '../navigation-safety';
 import { NodeRoutingPhaseProfiler } from './node-phase-profiler';
 
 const DEFAULT_HEADING_STEP = 5;
@@ -308,15 +312,10 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
         ...wind.times.slice(1).map((time, index) => (time.getTime() - wind.times[index].getTime()) / 3_600_000),
       );
       const requestedMinimumStep = Number(options?.minimumRoutingStepHours ?? 0.0625);
-      const minimumStepHours = Number.isFinite(requestedMinimumStep)
-        ? Math.max(0.0625, requestedMinimumStep)
-        : 0.0625;
+      const minimumStepHours = Number.isFinite(requestedMinimumStep) ? Math.max(0.0625, requestedMinimumStep) : 0.0625;
       const forceMotor = options?.forceMotor === true;
       const motorSpeedKn = Number(options?.motorSpeedKn ?? 0);
-      const arrivalRadiusNm = Math.max(
-        0.1,
-        Number(options?.arrivalRadiusNm ?? DEFAULT_ARRIVAL_RADIUS_NM),
-      );
+      const arrivalRadiusNm = Math.max(0.1, Number(options?.arrivalRadiusNm ?? DEFAULT_ARRIVAL_RADIUS_NM));
       // A forecast interval can be much longer than a short powered passage. At
       // five knots a three-hour GFS step travels 15 nm, which can overshoot a
       // nearby destination repeatedly. Refine forced-motor searches so one step
@@ -325,17 +324,11 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
         forceMotor && motorSpeedKn > 0
           ? Math.min(
               arrivalRadiusNm / motorSpeedKn,
-              haversineNM(request.start.lat, request.start.lon, request.end.lat, request.end.lon) /
-                motorSpeedKn,
+              haversineNM(request.start.lat, request.start.lon, request.end.lat, request.end.lon) / motorSpeedKn,
             )
           : sourceStepHours;
-      let maximumStepHours = Math.min(
-        sourceStepHours,
-        Math.max(minimumStepHours, poweredArrivalStepHours),
-      );
-      let lastLandResult:
-        | { route: RoutePoint[]; warning?: string; alternatives?: RoutePoint[][] }
-        | undefined;
+      let maximumStepHours = Math.min(sourceStepHours, Math.max(minimumStepHours, poweredArrivalStepHours));
+      let lastLandResult: { route: RoutePoint[]; warning?: string; alternatives?: RoutePoint[][] } | undefined;
       let lastLandError: unknown;
       while (true) {
         try {
@@ -563,6 +556,17 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
     }
 
     const seedVec = wind.getWind(start.lat, start.lon, startTimeIdx);
+    const initialShoreClearanceEstablished =
+      navigationConstraints.minimumShoreDistanceNm <= 0 ||
+      (!!navigationSafety?.shorelineIndex &&
+        segmentHasShoreClearance(
+          navigationSafety.shorelineIndex,
+          start.lat,
+          start.lon,
+          start.lat,
+          start.lon,
+          navigationConstraints.minimumShoreDistanceNm,
+        ));
     let isochrone: IsochronePoint[] = [
       {
         lat: start.lat,
@@ -575,6 +579,7 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
         windDir: windDirection(seedVec.u, seedVec.v),
         passageDayIndex: initialPassageDayIndex,
         underwayHoursToday: initialUnderwayHoursToday,
+        shoreClearanceEstablished: initialShoreClearanceEstablished,
         stepCalcMs: 0,
         parent: undefined,
       },
@@ -673,6 +678,7 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
             windDir: wdir,
             passageDayIndex: restBudget.passageDayIndex,
             underwayHoursToday: restBudget.hoursToday,
+            shoreClearanceEstablished: point.shoreClearanceEstablished,
             stepCalcMs: 0,
             gribFilePath,
             parent: point,
@@ -899,6 +905,18 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
           const effectiveSpeed = pendingSpeed[candidateIndex];
           const hdg = headings[pendingHeadingIndex[candidateIndex]].heading;
           const motoring = pendingMotoring[candidateIndex] !== 0;
+          const candidateShoreClearanceEstablished =
+            point.shoreClearanceEstablished === true ||
+            navigationConstraints.minimumShoreDistanceNm <= 0 ||
+            (!!navigationSafety?.shorelineIndex &&
+              segmentHasShoreClearance(
+                navigationSafety.shorelineIndex,
+                newLat,
+                newLon,
+                newLat,
+                newLon,
+                navigationConstraints.minimumShoreDistanceNm,
+              ));
 
           phaseStarted = profiling ? phaseProfiler.mark() : 0;
           const candidateSafetyViolation = hasNavigationConstraints
@@ -910,7 +928,11 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
                 point.lon,
                 newLat,
                 newLon,
-                { start, end },
+                {
+                  start,
+                  end,
+                  departureClearanceEstablished: point.shoreClearanceEstablished ?? false,
+                },
               )
             : undefined;
           if (profiling) phaseProfiler.record('safety', phaseStarted);
@@ -955,6 +977,7 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
             windDir: wdir,
             passageDayIndex: underwayBudget.passageDayIndex,
             underwayHoursToday: underwayBudget.hoursToday,
+            shoreClearanceEstablished: candidateShoreClearanceEstablished,
             stepCalcMs: 0,
             gribFilePath,
             parent: point,
@@ -991,7 +1014,11 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
                   newLon,
                   end.lat,
                   end.lon,
-                  { start, end },
+                  {
+                    start,
+                    end,
+                    departureClearanceEstablished: candidateShoreClearanceEstablished,
+                  },
                 )
               : undefined;
             if (profiling) phaseProfiler.record('safety', phaseStarted);

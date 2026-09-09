@@ -684,18 +684,13 @@ module.exports = (app: SignalKApp) => {
             app.debug(`Chart geometry unavailable; using GSHHG fallback: ${String(error)}`);
           }
         }
-        if (useSafetyMargin && !chartGeometry && !dilatedEdgeIndex) {
-          return void res.status(503).json({ error: 'Safety margin index not ready yet' });
-        }
         const shorelineIndex = chartGeometry?.index ?? edgeIndex;
-        const activeIndex = !useLandAvoidance
-          ? null
-          : (chartGeometry?.index ?? (useSafetyMargin ? dilatedEdgeIndex : edgeIndex));
+        const activeIndex = !useLandAvoidance ? null : (chartGeometry?.index ?? edgeIndex);
         const navigationConstraints: NavigationConstraints = {
           minimumDepthM: Number(mergedOptions.minimumDepthM ?? 0),
           minimumShoreDistanceNm: Math.max(
             Number(mergedOptions.minimumShoreDistanceNm ?? 0),
-            useSafetyMargin && chartGeometry ? 0.5 : 0,
+            useSafetyMargin ? 0.5 : 0,
           ),
           maximumOffshoreDistanceNm: Number(mergedOptions.maximumOffshoreDistanceNm ?? 0),
         };
@@ -712,8 +707,8 @@ module.exports = (app: SignalKApp) => {
         }
 
         // Shoreline clearance applies to the passage, not to the exact marina/anchorage pin. Land,
-        // depth, and offshore checks remain strict at both endpoints; the routing engine tapers the
-        // shore-clearance exception away within one configured-clearance radius.
+        // depth, and offshore checks remain strict at both endpoints; the routing engine permits a
+        // narrow departure until it reaches the full configured clearance, then keeps it strict.
         const endpointConstraints = {
           ...navigationConstraints,
           minimumShoreDistanceNm: 0,

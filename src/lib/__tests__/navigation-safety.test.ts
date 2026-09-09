@@ -35,40 +35,27 @@ test('endpoint allowance permits a close departure but requires clearance after 
     start: { lat: 0.5, lon: 1.001 },
     end: { lat: 1.8, lon: 2 },
   };
+  assert.equal(segmentHasShoreClearanceWithEndpointAllowance(shoreline, 0.5, 1.001, 0.5, 1.005, 0.5, endpoints), true);
+  assert.equal(segmentHasShoreClearanceWithEndpointAllowance(shoreline, 0.5, 1.001, 0.5, 1.01, 0.5, endpoints), true);
   assert.equal(
-    segmentHasShoreClearanceWithEndpointAllowance(
-      shoreline,
-      0.5,
-      1.001,
-      0.5,
-      1.005,
-      0.5,
-      endpoints,
-    ),
-    true,
+    segmentHasShoreClearanceWithEndpointAllowance(shoreline, 0.51, 1.001, 0.52, 1.001, 0.5, endpoints),
+    false,
   );
+});
+
+test('adaptive departure uses narrow clearance until full clearance is established', () => {
+  const endpoints = {
+    start: { lat: 0.5, lon: 1.0001 },
+    end: { lat: 1.8, lon: 2 },
+    departureClearanceEstablished: false,
+  };
+  assert.equal(segmentHasShoreClearanceWithEndpointAllowance(shoreline, 0.5, 1.0001, 0.5, 1.002, 0.5, endpoints), true);
+  assert.equal(segmentHasShoreClearanceWithEndpointAllowance(shoreline, 0.5, 1.002, 0.5, 1.01, 0.5, endpoints), true);
   assert.equal(
-    segmentHasShoreClearanceWithEndpointAllowance(
-      shoreline,
-      0.5,
-      1.001,
-      0.5,
-      1.01,
-      0.5,
-      endpoints,
-    ),
-    true,
-  );
-  assert.equal(
-    segmentHasShoreClearanceWithEndpointAllowance(
-      shoreline,
-      0.51,
-      1.001,
-      0.52,
-      1.001,
-      0.5,
-      endpoints,
-    ),
+    segmentHasShoreClearanceWithEndpointAllowance(shoreline, 0.5, 1.01, 0.5, 1.002, 0.5, {
+      ...endpoints,
+      departureClearanceEstablished: true,
+    }),
     false,
   );
 });

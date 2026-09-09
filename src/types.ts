@@ -131,6 +131,7 @@ export interface IsochronePoint {
   gribFilePath?: string;
   passageDayIndex: number;
   underwayHoursToday: number;
+  shoreClearanceEstablished?: boolean;
   parent?: IsochronePoint;
 }
 

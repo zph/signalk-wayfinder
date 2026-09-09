@@ -13,6 +13,8 @@ export interface NavigationConstraints {
 export interface ShoreClearanceEndpoints {
   start: { lat: number; lon: number };
   end: { lat: number; lon: number };
+  departureClearanceEstablished?: boolean;
+  departureMinimumDistanceNm?: number;
 }
 
 export type NavigationConstraintViolation =
@@ -198,6 +200,27 @@ export function segmentHasShoreClearanceWithEndpointAllowance(
   const firstInEnd = inZone(lat1, lon1, endpoints.end);
   const secondInEnd = inZone(lat2, lon2, endpoints.end);
 
+  // A close-to-shore departure can remain in a narrow channel until it first reaches the full
+  // configured clearance. From that point onward the larger clearance is sticky; only the final
+  // destination approach may taper back down. This lets a route leave a marina or enclosed bay
+  // without turning the departure exception into permission to hug the coast offshore.
+  if (endpoints.departureClearanceEstablished !== undefined) {
+    if (!endpoints.departureClearanceEstablished) {
+      const departureMinimum = Math.min(minimumDistanceNm, Math.max(0, endpoints.departureMinimumDistanceNm ?? 0.05));
+      if (!(departureMinimum > 0)) return true;
+      const firstInNarrowStart = haversineNM(lat1, lon1, endpoints.start.lat, endpoints.start.lon) <= departureMinimum;
+      if (firstInNarrowStart) {
+        return segmentHasShoreClearance(index, lat2, lon2, lat2, lon2, departureMinimum);
+      }
+      return segmentHasShoreClearance(index, lat1, lon1, lat2, lon2, departureMinimum);
+    }
+    if (firstInEnd && secondInEnd) return true;
+    if (secondInEnd) {
+      return segmentHasShoreClearance(index, lat1, lon1, lat1, lon1, minimumDistanceNm);
+    }
+    return segmentHasShoreClearance(index, lat1, lon1, lat2, lon2, minimumDistanceNm);
+  }
+
   if ((firstInStart && secondInStart) || (firstInEnd && secondInEnd)) return true;
   if (firstInStart || secondInEnd) {
     const waterPoint = firstInStart ? { lat: lat2, lon: lon2 } : { lat: lat1, lon: lon1 };
@@ -269,14 +292,7 @@ export function navigationConstraintViolation(
             constraints.minimumShoreDistanceNm,
             shorelineEndpoints,
           )
-        : segmentHasShoreClearance(
-            shorelineIndex,
-            lat1,
-            lon1,
-            lat2,
-            lon2,
-            constraints.minimumShoreDistanceNm,
-          )))
+        : segmentHasShoreClearance(shorelineIndex, lat1, lon1, lat2, lon2, constraints.minimumShoreDistanceNm)))
   ) {
     return 'too-close-to-shore';
   }
