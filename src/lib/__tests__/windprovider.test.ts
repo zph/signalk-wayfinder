@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { MultiFileWindProvider, nearestIdx, withMaximumTimeStep } from '../windprovider';
+import { MultiFileWindProvider, nearestIdx, withDepartureTime, withMaximumTimeStep } from '../windprovider';
 import { GribData, GribFileEntry } from '../../types';
 
 function makeGrib(opts: {
@@ -105,6 +105,24 @@ test('withMaximumTimeStep densifies a coarse forecast without changing sampled w
   assert.strictEqual(routed.times.at(-1)?.toISOString(), t3.toISOString());
   assert.strictEqual(routed.getWind(41, 11, 1).v, 7);
   assert.strictEqual(routed.coversPointAtTime(41, 11, 11), true);
+});
+
+test('withDepartureTime starts routing at the requested time while retaining later forecast steps', () => {
+  const t0 = new Date('2024-01-01T00:00:00Z');
+  const t3 = new Date('2024-01-01T03:00:00Z');
+  const t6 = new Date('2024-01-01T06:00:00Z');
+  const departure = new Date('2024-01-01T01:15:00Z');
+  const provider = new MultiFileWindProvider([makeEntry(makeGrib({ times: [t0, t3, t6], v: 7 }), 1000)]);
+
+  const routed = withDepartureTime(provider, departure);
+
+  assert.deepEqual(
+    routed.times.map((time) => time.toISOString()),
+    [departure, t3, t6].map((time) => time.toISOString()),
+  );
+  assert.strictEqual(routed.getWind(41, 11, 0).v, 7);
+  assert.strictEqual(routed.coversPointAtTime(41, 11, 0), true);
+  assert.strictEqual(withDepartureTime(routed, departure), routed);
 });
 
 test('MultiFileWindProvider: getWind returns freshest file when files overlap spatially', () => {

@@ -205,6 +205,11 @@ module.exports = (app: SignalKApp) => {
   }
 
   async function scanAndIndexGribDir(dir: string): Promise<void> {
+    // A route-specific forecast acquisition rescans this directory even on a disk-cache hit.
+    // Preserve decoded grids when the same file version is still present so repeat routes do
+    // not pay another GDAL open and full raster decode.
+    const cachedWind = new Map(gribFiles.map((entry) => [entry.meta.path, entry]));
+    const cachedCurrent = new Map(currentFiles.map((entry) => [entry.meta.path, entry]));
     gribFiles = [];
     currentFiles = [];
     currentProvider = null;
@@ -220,9 +225,11 @@ module.exports = (app: SignalKApp) => {
       try {
         const meta = await readGribMeta(p);
         if (meta.type === 'current') {
-          currentFiles.push({ meta, data: null });
+          const cached = cachedCurrent.get(meta.path);
+          currentFiles.push({ meta, data: cached?.meta.mtime === meta.mtime ? cached.data : null });
         } else {
-          gribFiles.push({ meta, data: null });
+          const cached = cachedWind.get(meta.path);
+          gribFiles.push({ meta, data: cached?.meta.mtime === meta.mtime ? cached.data : null });
         }
       } catch (e: any) {
         gribFailedFiles.push({ path: p, error: e.message });
@@ -232,7 +239,7 @@ module.exports = (app: SignalKApp) => {
     if (currentFiles.length > 0) {
       const freshest = [...currentFiles].sort((a, b) => b.meta.mtime - a.meta.mtime)[0];
       try {
-        freshest.data = await loadCurrentGrib(freshest.meta.path);
+        if (freshest.data === null) freshest.data = await loadCurrentGrib(freshest.meta.path);
         currentProvider = new SingleFileCurrentProvider(freshest);
       } catch (e: any) {
         gribFailedFiles.push({

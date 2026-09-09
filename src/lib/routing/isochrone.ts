@@ -29,7 +29,7 @@ import {
   trueWindAngle,
   DEG_TO_RAD,
 } from '../geo';
-import { withMaximumTimeStep } from '../windprovider';
+import { withDepartureTime, withMaximumTimeStep } from '../windprovider';
 import { advanceUnderwayBudget, isLegInDaylight, passageDayIndex, solarElevationDeg } from '../passage-constraints';
 import {
   navigationConstraintViolation,
@@ -188,9 +188,7 @@ function routingCorridor(value: unknown): GoalCorridorPoint[] | null {
 function routingCorridors(options: Record<string, unknown> | undefined): GoalCorridorPoint[][] {
   const multiple = options?._routingCorridors;
   if (Array.isArray(multiple)) {
-    const corridors = multiple
-      .map(routingCorridor)
-      .filter((corridor): corridor is GoalCorridorPoint[] => !!corridor);
+    const corridors = multiple.map(routingCorridor).filter((corridor): corridor is GoalCorridorPoint[] => !!corridor);
     if (corridors.length > 0) return corridors;
   }
   const single = routingCorridor(options?._routingCorridor);
@@ -351,6 +349,20 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
     options?: Record<string, unknown>,
     navigationSafety?: NavigationSafetyContext,
   ): Promise<{ route: RoutePoint[]; warning?: string; alternatives?: RoutePoint[][] }> {
+    const departureAlignedWind = withDepartureTime(wind, new Date(request.departureTime));
+    if (departureAlignedWind !== wind) {
+      return this.calculate(
+        departureAlignedWind,
+        current,
+        polar,
+        edgeIndex,
+        regionIndex,
+        request,
+        onProgress,
+        options,
+        navigationSafety,
+      );
+    }
     if (options?._adaptiveTimeStep !== true && wind.times.length >= 2) {
       // Start with the native forecast interval. If land defeats that search, retry the whole
       // isochrone at half the interval until narrow channels are resolved or the minimum useful
@@ -440,24 +452,69 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
           Number(options?.maxWindKn ?? 0),
           Number(options?.maxWaveM ?? 0),
         );
-        onProgress(100, route.map((point) => [point.lat, point.lon]));
+        onProgress(
+          100,
+          route.map((point) => [point.lat, point.lon]),
+        );
         return { route };
       }
+      const clearanceActivationIndex = corridor.findIndex((point) => point.shoreClearanceEstablished);
+      // A clearance flag only means that this point has reached the configured shoreline
+      // margin. In bays that can happen well before the boat has escaped the land mass that
+      // blocks the destination bearing. Keep the powered departure prefix until the remaining
+      // direct passage is clear, then hand the open-water portion to the weather router.
+      const openWaterEscapeIndex = corridor.findIndex(
+        (point, index) =>
+          index >= clearanceActivationIndex &&
+          (!edgeIndex || !segmentCrossesLandFast(edgeIndex, point.lat, point.lon, request.end.lat, request.end.lon)),
+      );
+      const motorEscapeIndex = openWaterEscapeIndex >= 0 ? openWaterEscapeIndex : clearanceActivationIndex;
+      const useMotorEscape =
+        !forceMotor && motorSpeedKn > 0 && !daylightOnly && !(maxHoursPerDay > 0) && motorEscapeIndex > 0;
+      const motorPrefix = useMotorEscape
+        ? motorRouteAlongCorridor(
+            corridor.slice(0, motorEscapeIndex + 1),
+            wind,
+            current,
+            motorSpeedKn,
+            Number(options?.maxWindKn ?? 0),
+            Number(options?.maxWaveM ?? 0),
+          )
+        : [];
+      const refinementStart = motorPrefix.at(-1);
+      const corridorTimeShiftMs = refinementStart
+        ? refinementStart.time.getTime() - corridor[motorEscapeIndex].timeMs
+        : 0;
+      const refinementCorridor = refinementStart
+        ? corridor.slice(motorEscapeIndex).map((point) => ({
+            ...point,
+            timeMs: point.timeMs + corridorTimeShiftMs,
+          }))
+        : corridor;
+      const refinementRequest = refinementStart
+        ? {
+            ...request,
+            start: { lat: refinementStart.lat, lon: refinementStart.lon },
+            departureTime: refinementStart.time.toISOString(),
+          }
+        : request;
       const fine = await this.calculate(
         wind,
         current,
         polar,
         edgeIndex,
         regionIndex,
-        request,
+        refinementRequest,
         (percent, frontier) => onProgress(15 + percent * 0.85, frontier),
         {
           ...options,
           coarseToFine: false,
           sharedAlternativeCount: requestedSharedAlternatives,
           _profileStage: 'corridor-refinement',
-          _routingCorridors: [corridor],
-          ...(clearanceActivationTimeMs !== undefined ? { _shoreClearanceActivationTimeMs: clearanceActivationTimeMs } : {}),
+          _routingCorridors: [refinementCorridor],
+          ...(clearanceActivationTimeMs !== undefined
+            ? { _shoreClearanceActivationTimeMs: clearanceActivationTimeMs + corridorTimeShiftMs }
+            : {}),
         },
         navigationSafety,
       );
@@ -465,7 +522,14 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
       if (fine.warning || fineEnd?.lat !== request.end.lat || fineEnd.lon !== request.end.lon) {
         throw new RoutingError('Bounded corridor refinement did not reach the destination', 'land');
       }
-      return fine;
+      if (motorPrefix.length === 0) return fine;
+      return {
+        ...fine,
+        route: [...motorPrefix, ...fine.route.slice(1)],
+        ...(fine.alternatives
+          ? { alternatives: fine.alternatives.map((route) => [...motorPrefix, ...route.slice(1)]) }
+          : {}),
+      };
     }
     const headingStep = Number(options?.headingStep ?? DEFAULT_HEADING_STEP);
     const sectorSize = Number(options?.sectorSize ?? DEFAULT_SECTOR_SIZE);
@@ -569,15 +633,15 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
     const initialShoreClearanceEstablished =
       clearanceActivationTimeMs <= wind.times[startTimeIdx].getTime() &&
       (navigationConstraints.minimumShoreDistanceNm <= 0 ||
-      (!!navigationSafety?.shorelineIndex &&
-        segmentHasShoreClearance(
-          navigationSafety.shorelineIndex,
-          start.lat,
-          start.lon,
-          start.lat,
-          start.lon,
-          navigationConstraints.minimumShoreDistanceNm,
-        )));
+        (!!navigationSafety?.shorelineIndex &&
+          segmentHasShoreClearance(
+            navigationSafety.shorelineIndex,
+            start.lat,
+            start.lon,
+            start.lat,
+            start.lon,
+            navigationConstraints.minimumShoreDistanceNm,
+          )));
     let isochrone: IsochronePoint[] = [
       {
         lat: start.lat,

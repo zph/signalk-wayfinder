@@ -63,6 +63,52 @@ class ResampledWindProvider implements WindProvider {
   }
 }
 
+class DepartureAlignedWindProvider implements WindProvider {
+  readonly times: Date[];
+  private readonly sourceIndexes: Int32Array;
+
+  constructor(
+    private readonly source: WindProvider,
+    departure: Date,
+  ) {
+    const departureMs = departure.getTime();
+    this.times = [departure, ...source.times.filter((time) => time.getTime() > departureMs)];
+    this.sourceIndexes = Int32Array.from(this.times, (time) => nearestIdx(source.times, time));
+  }
+
+  getWind(lat: number, lon: number, timeIdx: number): WindVector {
+    return this.source.getWind(lat, lon, this.sourceIndexes[timeIdx]);
+  }
+
+  getFilePathForPoint(lat: number, lon: number, timeIdx: number): string {
+    return this.source.getFilePathForPoint(lat, lon, this.sourceIndexes[timeIdx]);
+  }
+
+  getWave(lat: number, lon: number, time: Date): number | undefined {
+    return this.source.getWave(lat, lon, time);
+  }
+
+  coversPoint(lat: number, lon: number): boolean {
+    return this.source.coversPoint(lat, lon);
+  }
+
+  coversPointAtTime(lat: number, lon: number, timeIdx: number): boolean {
+    return this.source.coversPointAtTime(lat, lon, this.sourceIndexes[timeIdx]);
+  }
+}
+
+export function withDepartureTime(wind: WindProvider, departure: Date): WindProvider {
+  const departureMs = departure.getTime();
+  if (
+    !Number.isFinite(departureMs) ||
+    wind.times.some((time) => time.getTime() === departureMs) ||
+    departureMs < (wind.times[0]?.getTime() ?? Infinity) ||
+    departureMs >= (wind.times.at(-1)?.getTime() ?? Number.NEGATIVE_INFINITY)
+  )
+    return wind;
+  return new DepartureAlignedWindProvider(wind, departure);
+}
+
 export function withMaximumTimeStep(wind: WindProvider, maximumStepHours: number): WindProvider {
   if (!Number.isFinite(maximumStepHours) || maximumStepHours <= 0 || wind.times.length < 2) return wind;
   const maximumStepMs = maximumStepHours * 3_600_000;
