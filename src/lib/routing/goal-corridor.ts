@@ -265,12 +265,17 @@ export function buildGoalDirectedCorridor(
         const key = gridKey(ix, iy, clearanceEstablished);
         if ((best.get(key) ?? Infinity) <= nextG) continue;
         best.set(key, nextG);
+        const uncommittedPenalty =
+          minimumShoreDistanceNm > 0 && !clearanceEstablished ? minimumShoreDistanceNm * 2 : 0;
         open.push({
           ...next,
           ix,
           iy,
           g: nextG,
-          f: nextG + heuristic + turn * stepNm * 0.2,
+          // Weighted A* intentionally favors destination progress over exploring every equally
+          // short coastal cell. A small uncommitted-state cost tries full clearance first while
+          // retaining the narrow state whenever a later pinch makes that commitment impossible.
+          f: nextG + heuristic * 1.15 + turn * stepNm * 0.2 + uncommittedPenalty,
           clearanceEstablished,
           parent: current,
         });
