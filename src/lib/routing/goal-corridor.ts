@@ -8,6 +8,7 @@ import { isPointInRegion, segmentCrossesRegion } from '../regions';
 
 export interface GoalCorridorPoint extends LatLon {
   timeMs: number;
+  shoreClearanceEstablished: boolean;
 }
 
 interface SearchNode extends LatLon {
@@ -79,15 +80,23 @@ function gridKey(ix: number, iy: number, clearanceEstablished: boolean): string 
   return `${ix}:${iy}:${clearanceEstablished ? 1 : 0}`;
 }
 
-function reconstruct(node: SearchNode): LatLon[] {
-  const result: LatLon[] = [];
+function reconstruct(node: SearchNode): Array<LatLon & { shoreClearanceEstablished: boolean }> {
+  const result: Array<LatLon & { shoreClearanceEstablished: boolean }> = [];
   for (let current: SearchNode | undefined = node; current; current = current.parent) {
-    result.push({ lat: current.lat, lon: current.lon });
+    result.push({
+      lat: current.lat,
+      lon: current.lon,
+      shoreClearanceEstablished: current.clearanceEstablished,
+    });
   }
   return result.reverse();
 }
 
-function withTimes(points: LatLon[], departureTimeMs: number, planningSpeedKn: number): GoalCorridorPoint[] {
+function withTimes(
+  points: Array<LatLon & { shoreClearanceEstablished: boolean }>,
+  departureTimeMs: number,
+  planningSpeedKn: number,
+): GoalCorridorPoint[] {
   let timeMs = departureTimeMs;
   return points.map((point, index) => {
     if (index > 0) {
@@ -119,7 +128,8 @@ export function buildGoalDirectedCorridor(
   onProgress: (percent: number, frontier: Array<[number, number]>) => void,
 ): GoalCorridorPoint[] {
   const directNm = haversineNM(request.start.lat, request.start.lon, request.end.lat, request.end.lon);
-  if (!(directNm > 0)) return [{ ...request.start, timeMs: Date.parse(request.departureTime) }];
+  if (!(directNm > 0))
+    return [{ ...request.start, timeMs: Date.parse(request.departureTime), shoreClearanceEstablished: true }];
   // Coastal-length passages need sub-half-mile cells to thread entrances such as Glen Cove;
   // longer passages may relax toward 1.5 nm while remaining hard-bounded.
   const stepNm = Math.max(0.25, Math.min(1.5, Number(options.gridStepNm ?? Math.max(0.35, directNm / 180))));
@@ -156,7 +166,7 @@ export function buildGoalDirectedCorridor(
   for (let expansions = 0; open.size > 0 && expansions < maximumExpansions; expansions++) {
     const current = open.pop();
     const remainingNm = haversineNM(current.lat, current.lon, request.end.lat, request.end.lon);
-    if (remainingNm <= stepNm * 1.5) {
+    if (remainingNm <= stepNm * 1.5 && (current.clearanceEstablished || !(minimumShoreDistanceNm > 0))) {
       const finalViolation = navigationConstraintViolation(
         shorelineIndex,
         null,
@@ -182,7 +192,10 @@ export function buildGoalDirectedCorridor(
           (!isPointInRegion(regionIndex, avoidIds, request.end.lat, request.end.lon) &&
             !segmentCrossesRegion(regionIndex, avoidIds, current.lat, current.lon, request.end.lat, request.end.lon)))
       ) {
-        const path = [...reconstruct(current), request.end];
+        const path = [
+          ...reconstruct(current),
+          { ...request.end, shoreClearanceEstablished: current.clearanceEstablished },
+        ];
         onProgress(15, path.map((point) => [point.lat, point.lon]));
         return withTimes(path, Date.parse(request.departureTime), planningSpeedKn);
       }
@@ -223,21 +236,6 @@ export function buildGoalDirectedCorridor(
         },
       );
       if (violation) continue;
-      const clearanceEstablished =
-        current.clearanceEstablished ||
-        (!(minimumShoreDistanceNm > 0) ||
-          (!!shorelineIndex &&
-            segmentHasShoreClearance(
-              shorelineIndex,
-              next.lat,
-              next.lon,
-              next.lat,
-              next.lon,
-              minimumShoreDistanceNm,
-            )));
-      const key = gridKey(ix, iy, clearanceEstablished);
-      if ((best.get(key) ?? Infinity) <= nextG) continue;
-      best.set(key, nextG);
       const heuristic = haversineNM(next.lat, next.lon, request.end.lat, request.end.lon);
       // Small turn penalty discourages jagged corridors without changing feasibility.
       const previousBearing = current.parent
@@ -245,7 +243,38 @@ export function buildGoalDirectedCorridor(
         : bearingTo(request.start.lat, request.start.lon, request.end.lat, request.end.lon);
       const nextBearing = bearingTo(current.lat, current.lon, next.lat, next.lon);
       const turn = Math.abs((((nextBearing - previousBearing + 540) % 360) - 180) / 180);
-      open.push({ ...next, ix, iy, g: nextG, f: nextG + heuristic + turn * stepNm * 0.2, clearanceEstablished, parent: current });
+      const canEstablishClearance =
+        !(minimumShoreDistanceNm > 0) ||
+        (!!shorelineIndex &&
+          segmentHasShoreClearance(
+            shorelineIndex,
+            next.lat,
+            next.lon,
+            next.lat,
+            next.lon,
+            minimumShoreDistanceNm,
+          ));
+      // Before committing, preserve both possibilities at a qualifying point. The committed state
+      // enforces full clearance forever; the uncommitted state can survive a later channel pinch.
+      const nextStates = current.clearanceEstablished
+        ? [true]
+        : canEstablishClearance
+          ? [true, false]
+          : [false];
+      for (const clearanceEstablished of nextStates) {
+        const key = gridKey(ix, iy, clearanceEstablished);
+        if ((best.get(key) ?? Infinity) <= nextG) continue;
+        best.set(key, nextG);
+        open.push({
+          ...next,
+          ix,
+          iy,
+          g: nextG,
+          f: nextG + heuristic + turn * stepNm * 0.2,
+          clearanceEstablished,
+          parent: current,
+        });
+      }
     }
   }
   throw new Error(`No bounded chart-safe corridor found within ${maximumExpansions} A* expansions`);

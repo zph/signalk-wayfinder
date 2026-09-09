@@ -364,6 +364,7 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
         },
         onProgress,
       );
+      const clearanceActivationTimeMs = corridor.find((point) => point.shoreClearanceEstablished)?.timeMs;
       const fine = await this.calculate(
         wind,
         current,
@@ -378,6 +379,7 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
           sharedAlternativeCount: requestedSharedAlternatives,
           _profileStage: 'corridor-refinement',
           _routingCorridors: [corridor],
+          ...(clearanceActivationTimeMs !== undefined ? { _shoreClearanceActivationTimeMs: clearanceActivationTimeMs } : {}),
         },
         navigationSafety,
       );
@@ -485,8 +487,10 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
     }
 
     const seedVec = wind.getWind(start.lat, start.lon, startTimeIdx);
+    const clearanceActivationTimeMs = Number(options?._shoreClearanceActivationTimeMs ?? Number.NEGATIVE_INFINITY);
     const initialShoreClearanceEstablished =
-      navigationConstraints.minimumShoreDistanceNm <= 0 ||
+      clearanceActivationTimeMs <= wind.times[startTimeIdx].getTime() &&
+      (navigationConstraints.minimumShoreDistanceNm <= 0 ||
       (!!navigationSafety?.shorelineIndex &&
         segmentHasShoreClearance(
           navigationSafety.shorelineIndex,
@@ -495,7 +499,7 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
           start.lat,
           start.lon,
           navigationConstraints.minimumShoreDistanceNm,
-        ));
+        )));
     let isochrone: IsochronePoint[] = [
       {
         lat: start.lat,
@@ -836,16 +840,17 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
           const motoring = pendingMotoring[candidateIndex] !== 0;
           const candidateShoreClearanceEstablished =
             point.shoreClearanceEstablished === true ||
-            navigationConstraints.minimumShoreDistanceNm <= 0 ||
-            (!!navigationSafety?.shorelineIndex &&
-              segmentHasShoreClearance(
-                navigationSafety.shorelineIndex,
-                newLat,
-                newLon,
-                newLat,
-                newLon,
-                navigationConstraints.minimumShoreDistanceNm,
-              ));
+            (nextTime.getTime() >= clearanceActivationTimeMs &&
+              (navigationConstraints.minimumShoreDistanceNm <= 0 ||
+                (!!navigationSafety?.shorelineIndex &&
+                  segmentHasShoreClearance(
+                    navigationSafety.shorelineIndex,
+                    newLat,
+                    newLon,
+                    newLat,
+                    newLon,
+                    navigationConstraints.minimumShoreDistanceNm,
+                  ))));
 
           phaseStarted = profiling ? phaseProfiler.mark() : 0;
           const candidateSafetyViolation = hasNavigationConstraints

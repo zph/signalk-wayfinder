@@ -28,7 +28,11 @@ test('goal-directed corridor reaches open-water destination with a bounded A* se
   const corridor = buildGoalDirectedCorridor(null, null, request, undefined, { constraints }, (value) =>
     progress.push(value),
   );
-  assert.deepEqual(corridor[0], { ...request.start, timeMs: Date.parse(departureTime) });
+  assert.deepEqual(corridor[0], {
+    ...request.start,
+    timeMs: Date.parse(departureTime),
+    shoreClearanceEstablished: true,
+  });
   assert.equal(corridor.at(-1)?.lat, request.end.lat);
   assert.equal(corridor.at(-1)?.lon, request.end.lon);
   assert.equal(progress.at(-1), 15);
