@@ -192,7 +192,9 @@ export function buildGoalDirectedCorridor(
           start: request.start,
           end: request.end,
           departureClearanceEstablished: current.clearanceEstablished,
-          departureMinimumDistanceNm: 0.05,
+          // The endpoint escape has no added buffer, but land intersection checks above remain
+          // mandatory. This permits charted marina and cove entrances narrower than 0.1 nm.
+          departureMinimumDistanceNm: 0,
         },
       );
       if (
@@ -245,7 +247,7 @@ export function buildGoalDirectedCorridor(
           start: request.start,
           end: request.end,
           departureClearanceEstablished: current.clearanceEstablished,
-          departureMinimumDistanceNm: 0.05,
+          departureMinimumDistanceNm: 0,
         },
       );
       if (violation) continue;
