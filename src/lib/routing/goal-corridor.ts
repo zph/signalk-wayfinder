@@ -120,8 +120,10 @@ export function buildGoalDirectedCorridor(
 ): GoalCorridorPoint[] {
   const directNm = haversineNM(request.start.lat, request.start.lon, request.end.lat, request.end.lon);
   if (!(directNm > 0)) return [{ ...request.start, timeMs: Date.parse(request.departureTime) }];
-  const stepNm = Math.max(0.25, Math.min(2, Number(options.gridStepNm ?? Math.max(0.5, directNm / 100))));
-  const maximumExpansions = Math.max(100, Math.trunc(Number(options.maximumExpansions ?? 30_000)));
+  // Coastal-length passages need sub-half-mile cells to thread entrances such as Glen Cove;
+  // longer passages may relax toward 1.5 nm while remaining hard-bounded.
+  const stepNm = Math.max(0.25, Math.min(1.5, Number(options.gridStepNm ?? Math.max(0.35, directNm / 180))));
+  const maximumExpansions = Math.max(100, Math.trunc(Number(options.maximumExpansions ?? 120_000)));
   const maximumDetourNm = directNm * Math.max(1.1, Number(options.maximumDetourFactor ?? 2.25)) + 10;
   const planningSpeedKn = Math.max(0.3, Number(options.planningSpeedKn ?? 5));
   const longitudeScale = Math.max(0.05, Math.cos((request.start.lat * Math.PI) / 180));
