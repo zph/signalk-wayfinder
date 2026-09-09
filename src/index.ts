@@ -888,7 +888,12 @@ module.exports = (app: SignalKApp) => {
           if (objective === 'allMotoring' && !(Number(mergedOptions.motorSpeedKn) > 0)) {
             throw new Error('All-motoring routes require an engine cruising speed greater than 0 knots');
           }
-          const searchPlan = planAlternativeSearch(mergedOptions, objective, requestedCount, points.length === 2);
+          const searchPlan = planAlternativeSearch(
+            { ...mergedOptions, ...navigationConstraints },
+            objective,
+            requestedCount,
+            points.length === 2,
+          );
           const useSharedAlternatives = searchPlan.shared;
           const attemptCount = searchPlan.tasks.length;
           const candidates: RouteAlternative[] = [];
@@ -985,7 +990,7 @@ module.exports = (app: SignalKApp) => {
               polar: routePolar,
               dataDir: pluginDataDir(app),
               hiresLand: hiresActive,
-              routeLandMode: !useLandAvoidance ? 'none' : useSafetyMargin ? 'dilated' : 'base',
+              routeLandMode: !useLandAvoidance ? 'none' : 'base',
               ...(chartGeometry ? { inlineLandIndex: chartGeometry.index } : {}),
               needsShorelineIndex,
               regions: regionIndex ? Array.from(regionIndex.regions.entries()) : [],
