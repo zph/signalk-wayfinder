@@ -794,7 +794,13 @@ module.exports = (app: SignalKApp) => {
               `${acquired.cacheHit ? 'Reused' : 'Downloaded'} ${nodepath.basename(acquired.path)} through f${acquired.forecastHours}`,
             );
             autoGribPath = acquired.path;
-            await scanAndIndexGribDir(settings.gribDir);
+            const indexedAutoGrib = gribFiles.find((entry) => entry.meta.path === acquired.path);
+            let autoGribAlreadyIndexed = false;
+            if (acquired.cacheHit && indexedAutoGrib) {
+              const stat = await fs.stat(acquired.path);
+              autoGribAlreadyIndexed = indexedAutoGrib.meta.mtime === stat.mtimeMs;
+            }
+            if (!autoGribAlreadyIndexed) await scanAndIndexGribDir(settings.gribDir);
             calcStatus = { status: 'idle', progress: 0 };
           } catch (error) {
             calcStatus = {
