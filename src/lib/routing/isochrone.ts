@@ -459,77 +459,101 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
         return { route };
       }
       const clearanceActivationIndex = corridor.findIndex((point) => point.shoreClearanceEstablished);
-      // A clearance flag only means that this point has reached the configured shoreline
-      // margin. In bays that can happen well before the boat has escaped the land mass that
-      // blocks the destination bearing. Keep the powered departure prefix until the remaining
-      // direct passage is clear, then hand the open-water portion to the weather router.
-      const openWaterEscapeIndex = corridor.findIndex(
-        (point, index) =>
-          index >= clearanceActivationIndex &&
-          (!edgeIndex || !segmentCrossesLandFast(edgeIndex, point.lat, point.lon, request.end.lat, request.end.lon)),
-      );
-      const motorEscapeIndex = openWaterEscapeIndex >= 0 ? openWaterEscapeIndex : clearanceActivationIndex;
       const useMotorEscape =
-        !forceMotor && motorSpeedKn > 0 && !daylightOnly && !(maxHoursPerDay > 0) && motorEscapeIndex > 0;
-      const motorPrefix = useMotorEscape
-        ? motorRouteAlongCorridor(
-            corridor.slice(0, motorEscapeIndex + 1),
+        !forceMotor && motorSpeedKn > 0 && !daylightOnly && !(maxHoursPerDay > 0) && clearanceActivationIndex > 0;
+      const handoffIndices: number[] = useMotorEscape ? [clearanceActivationIndex] : [0];
+      if (useMotorEscape) {
+        let distanceFromClearanceNm = 0;
+        let thresholdIndex = 0;
+        const handoffDistancesNm = [5, 10, 20, 40];
+        for (let index = clearanceActivationIndex + 1; index < corridor.length - 1; index++) {
+          const previous = corridor[index - 1];
+          const point = corridor[index];
+          distanceFromClearanceNm += haversineNM(previous.lat, previous.lon, point.lat, point.lon);
+          if (distanceFromClearanceNm >= handoffDistancesNm[thresholdIndex]) {
+            handoffIndices.push(index);
+            thresholdIndex++;
+            if (thresholdIndex >= handoffDistancesNm.length) break;
+          }
+        }
+        handoffIndices.push(corridor.length - 1);
+      }
+
+      let lastRefinementError: unknown;
+      for (const motorEscapeIndex of handoffIndices) {
+        const motorPrefix = useMotorEscape
+          ? motorRouteAlongCorridor(
+              corridor.slice(0, motorEscapeIndex + 1),
+              wind,
+              current,
+              motorSpeedKn,
+              Number(options?.maxWindKn ?? 0),
+              Number(options?.maxWaveM ?? 0),
+            )
+          : [];
+        if (motorEscapeIndex === corridor.length - 1) {
+          onProgress(
+            100,
+            motorPrefix.map((point) => [point.lat, point.lon]),
+          );
+          return { route: motorPrefix };
+        }
+        const refinementStart = motorPrefix.at(-1);
+        const corridorTimeShiftMs = refinementStart
+          ? refinementStart.time.getTime() - corridor[motorEscapeIndex].timeMs
+          : 0;
+        const refinementCorridor = refinementStart
+          ? corridor.slice(motorEscapeIndex).map((point) => ({
+              ...point,
+              timeMs: point.timeMs + corridorTimeShiftMs,
+            }))
+          : corridor;
+        const refinementRequest = refinementStart
+          ? {
+              ...request,
+              start: { lat: refinementStart.lat, lon: refinementStart.lon },
+              departureTime: refinementStart.time.toISOString(),
+            }
+          : request;
+        try {
+          const fine = await this.calculate(
             wind,
             current,
-            motorSpeedKn,
-            Number(options?.maxWindKn ?? 0),
-            Number(options?.maxWaveM ?? 0),
-          )
-        : [];
-      const refinementStart = motorPrefix.at(-1);
-      const corridorTimeShiftMs = refinementStart
-        ? refinementStart.time.getTime() - corridor[motorEscapeIndex].timeMs
-        : 0;
-      const refinementCorridor = refinementStart
-        ? corridor.slice(motorEscapeIndex).map((point) => ({
-            ...point,
-            timeMs: point.timeMs + corridorTimeShiftMs,
-          }))
-        : corridor;
-      const refinementRequest = refinementStart
-        ? {
-            ...request,
-            start: { lat: refinementStart.lat, lon: refinementStart.lon },
-            departureTime: refinementStart.time.toISOString(),
+            polar,
+            edgeIndex,
+            regionIndex,
+            refinementRequest,
+            (percent, frontier) => onProgress(15 + percent * 0.85, frontier),
+            {
+              ...options,
+              coarseToFine: false,
+              sharedAlternativeCount: requestedSharedAlternatives,
+              _profileStage: 'corridor-refinement',
+              _routingCorridors: [refinementCorridor],
+              ...(clearanceActivationTimeMs !== undefined
+                ? { _shoreClearanceActivationTimeMs: clearanceActivationTimeMs + corridorTimeShiftMs }
+                : {}),
+            },
+            navigationSafety,
+          );
+          const fineEnd = fine.route.at(-1);
+          if (fine.warning || fineEnd?.lat !== request.end.lat || fineEnd.lon !== request.end.lon) {
+            throw new RoutingError('Bounded corridor refinement did not reach the destination', 'land');
           }
-        : request;
-      const fine = await this.calculate(
-        wind,
-        current,
-        polar,
-        edgeIndex,
-        regionIndex,
-        refinementRequest,
-        (percent, frontier) => onProgress(15 + percent * 0.85, frontier),
-        {
-          ...options,
-          coarseToFine: false,
-          sharedAlternativeCount: requestedSharedAlternatives,
-          _profileStage: 'corridor-refinement',
-          _routingCorridors: [refinementCorridor],
-          ...(clearanceActivationTimeMs !== undefined
-            ? { _shoreClearanceActivationTimeMs: clearanceActivationTimeMs + corridorTimeShiftMs }
-            : {}),
-        },
-        navigationSafety,
-      );
-      const fineEnd = fine.route.at(-1);
-      if (fine.warning || fineEnd?.lat !== request.end.lat || fineEnd.lon !== request.end.lon) {
-        throw new RoutingError('Bounded corridor refinement did not reach the destination', 'land');
+          if (motorPrefix.length === 0) return fine;
+          return {
+            ...fine,
+            route: [...motorPrefix, ...fine.route.slice(1)],
+            ...(fine.alternatives
+              ? { alternatives: fine.alternatives.map((route) => [...motorPrefix, ...route.slice(1)]) }
+              : {}),
+          };
+        } catch (error) {
+          if (!useMotorEscape || !(error instanceof RoutingError)) throw error;
+          lastRefinementError = error;
+        }
       }
-      if (motorPrefix.length === 0) return fine;
-      return {
-        ...fine,
-        route: [...motorPrefix, ...fine.route.slice(1)],
-        ...(fine.alternatives
-          ? { alternatives: fine.alternatives.map((route) => [...motorPrefix, ...route.slice(1)]) }
-          : {}),
-      };
+      throw lastRefinementError;
     }
     const headingStep = Number(options?.headingStep ?? DEFAULT_HEADING_STEP);
     const sectorSize = Number(options?.sectorSize ?? DEFAULT_SECTOR_SIZE);
