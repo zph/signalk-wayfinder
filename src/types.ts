@@ -179,8 +179,9 @@ export interface NavigationSafetyContext {
 }
 
 export interface CalculationStatus {
-  status: 'idle' | 'calculating' | 'done' | 'warning' | 'error';
+  status: 'idle' | 'downloading' | 'calculating' | 'done' | 'warning' | 'error';
   progress: number; // 0–100
+  phaseStartedAt?: string;
   routeId?: string;
   error?: string;
   warning?: string;

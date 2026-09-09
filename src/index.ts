@@ -618,7 +618,7 @@ module.exports = (app: SignalKApp) => {
         }
         if (!polar) return void res.status(503).json({ error: 'Polar Performance has no active polar' });
         const routePolar = polar;
-        if (calcStatus.status === 'calculating') {
+        if (calcStatus.status === 'downloading' || calcStatus.status === 'calculating') {
           return void res.status(409).json({ error: 'Calculation already in progress' });
         }
         // Refresh region index so newly-created SignalK regions are picked up
@@ -763,6 +763,11 @@ module.exports = (app: SignalKApp) => {
           if (!settings?.gribDir)
             return void res.status(503).json({ error: 'Automatic forecast acquisition requires gribDir' });
           app.setPluginStatus('Acquiring route-specific NOAA GFS forecast...');
+          calcStatus = {
+            status: 'downloading',
+            progress: 0,
+            phaseStartedAt: new Date().toISOString(),
+          };
           try {
             const acquired = await ensureAutoGrib({
               points,
@@ -774,9 +779,15 @@ module.exports = (app: SignalKApp) => {
             );
             autoGribPath = acquired.path;
             await scanAndIndexGribDir(settings.gribDir);
+            calcStatus = { status: 'idle', progress: 0 };
           } catch (error) {
-            return void res.status(503).json({
+            calcStatus = {
+              status: 'error',
+              progress: 0,
               error: `Automatic forecast acquisition failed: ${error instanceof Error ? error.message : String(error)}`,
+            };
+            return void res.status(503).json({
+              error: calcStatus.error,
             });
           }
         }
@@ -1136,7 +1147,7 @@ module.exports = (app: SignalKApp) => {
       });
 
       binnacleRoute(router, 'cancel').post('/cancel', (_req: Request, res: Response) => {
-        const wasCalculating = calcStatus.status === 'calculating';
+        const wasCalculating = calcStatus.status === 'downloading' || calcStatus.status === 'calculating';
         calculationSequence += 1;
         for (const worker of calculationWorkers) void worker.terminate();
         calculationWorkers.clear();
