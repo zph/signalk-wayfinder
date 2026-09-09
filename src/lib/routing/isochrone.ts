@@ -916,6 +916,22 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
           const effectiveSpeed = pendingSpeed[candidateIndex];
           const hdg = headings[pendingHeadingIndex[candidateIndex]].heading;
           const motoring = pendingMotoring[candidateIndex] !== 0;
+
+          // Most land-safe candidates will be discarded by sector pruning. Decide whether a
+          // candidate can affect the frontier or arrival set before running the more expensive
+          // shoreline-distance and region checks. A rejected safety candidate is never committed,
+          // so later candidates can still claim the same frontier slot.
+          phaseStarted = profiling ? phaseProfiler.mark() : 0;
+          const frontierAccepted = frontierAccumulator.consider(newLat, newLon, pendingCorridorLane[candidateIndex]);
+          if (profiling) phaseProfiler.record('prune', phaseStarted);
+          phaseStarted = profiling ? phaseProfiler.mark() : 0;
+          const couldBeArrival = Math.abs(newLat - end.lat) <= arrivalLatitudeTolerance;
+          const distToEnd = couldBeArrival ? haversineNM(newLat, newLon, end.lat, end.lon) : Infinity;
+          const isArrivalCandidate = couldBeArrival && distToEnd <= arrivalRadiusNm;
+          if (profiling) phaseProfiler.record('candidateAndArrival', phaseStarted);
+          if (isArrivalCandidate && profiling) phaseProfiler.increment('arrivalCandidates');
+          if (!frontierAccepted && !isArrivalCandidate) continue;
+
           const candidateShoreClearanceEstablished =
             point.shoreClearanceEstablished === true ||
             (nextTime.getTime() >= clearanceActivationTimeMs &&
@@ -966,16 +982,6 @@ export class IsochroneAlgorithm implements RoutingAlgorithm {
             continue;
           }
 
-          phaseStarted = profiling ? phaseProfiler.mark() : 0;
-          const frontierAccepted = frontierAccumulator.consider(newLat, newLon, pendingCorridorLane[candidateIndex]);
-          if (profiling) phaseProfiler.record('prune', phaseStarted);
-          phaseStarted = profiling ? phaseProfiler.mark() : 0;
-          const couldBeArrival = Math.abs(newLat - end.lat) <= arrivalLatitudeTolerance;
-          const distToEnd = couldBeArrival ? haversineNM(newLat, newLon, end.lat, end.lon) : Infinity;
-          const isArrivalCandidate = couldBeArrival && distToEnd <= arrivalRadiusNm;
-          if (profiling) phaseProfiler.record('candidateAndArrival', phaseStarted);
-          if (isArrivalCandidate && profiling) phaseProfiler.increment('arrivalCandidates');
-          if (!frontierAccepted && !isArrivalCandidate) continue;
           phaseStarted = profiling ? phaseProfiler.mark() : 0;
           const newPoint: IsochronePoint = {
             lat: newLat,
