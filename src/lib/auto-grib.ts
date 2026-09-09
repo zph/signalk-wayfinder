@@ -22,8 +22,9 @@ const MAX_FORECAST_HOURS = 384;
 const CACHE_VERSION = 1;
 
 function gfsCycle(now: Date): Date {
-  // GFS cycles are published every six hours; five hours leaves enough time for the run to complete.
-  const ready = new Date(now.getTime() - 5 * 3_600_000);
+  // The early forecast hours appear before the complete 384-hour run. Because Wayfinder always
+  // acquires the maximum horizon, select a cycle old enough for its final slices to be published.
+  const ready = new Date(now.getTime() - 8 * 3_600_000);
   ready.setUTCHours(Math.floor(ready.getUTCHours() / 6) * 6, 0, 0, 0);
   return ready;
 }
