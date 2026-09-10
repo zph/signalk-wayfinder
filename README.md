@@ -5,6 +5,70 @@
 > you to Kristian and all upstream contributors for their work. This fork aims to remove the manual
 > steps from the weather-routing workflow and integrate it with Binnacle for a nicer user interface.
 
+<details>
+<summary><strong>How this fork differs from upstream</strong></summary>
+
+This inventory compares Sail Wayfinder with
+[`upstream/main` at `a69fc1b`](https://github.com/kristianwiklund/signalk-weather-routing/commit/a69fc1bba9eab35d348ecd5991d60a718c44418a).
+I appreciate Kristian Wiklund and the upstream contributors for the original routing work and the
+foundation this fork continues to build on.
+
+I am happy to upstream changes that prove useful beyond this fork. I have been iterating here first
+to learn which ideas hold up and what shape makes sense before proposing them upstream.
+Commit IDs are from this fork. Follow-up commits are listed with the feature they refined so the
+history remains auditable without turning the main README into a changelog.
+
+### Major features and changes
+
+| Difference                                                                                                                                                            | Commits                                                                                                                                       |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| Binnacle integration API with readiness and capability discovery, calculation cancellation, pending-route retrieval, and authenticated cross-plugin access            | `ef28c09`, `3900649`, `4776718`                                                                                                               |
+| Automatic route-specific NOAA GFS acquisition, resilient download resumption and redirects, complete forecast horizons, and selection of fully published model cycles | `9fa875d`, `853fc4f`, `02c9f3e`, `6daf5ca`, `533182a`, `280beec`                                                                              |
+| Polar Performance as the canonical polar provider, including its active polar and configured performance adjustment, plus a declared plugin dependency                | `4686817`, `1b80ec9`                                                                                                                          |
+| Independent route-quality validation before save, including geometry, timing, wind-angle, polar-speed, land, region, and configured safety checks                     | `01ad74a`, `fdd980f`                                                                                                                          |
+| Passage schedules with daylight-only sailing, daily underway limits, wait periods, and budget continuity across required waypoints                                    | `be51e9d`, `567453e`                                                                                                                          |
+| Fail-closed navigation constraints for raster depth, shoreline clearance, offshore distance, vessel draft, chart geometry, and mandatory land avoidance               | `56a2d93`, `f066c2b`, `4f650e9`, `1614bf7`, `16679ab`, `97188ae`, `f2478f6`                                                                   |
+| Multiple geometrically distinct alternatives ranked with quality, propulsion, wind, wave, and time-weighted passage statistics                                        | `891e059`, `0c7d570`, `f8a3108`                                                                                                               |
+| Persistent high-resolution GSHHG shoreline assets with reproducible container builds and preserved interior-water rings                                               | `b8a84b7`, `c4a6838`                                                                                                                          |
+| Coastal and marina routing refinements for obstructed approaches, cove departures, narrow-water escape paths, short motor passages, and final-leg timing              | `a79d3d8`, `c1e04db`, `8b86d6b`, `183cc46`, `4275efa`, `6b7c953`, `b072897`, `0386c30`, `7fd9aaa`, `c926e0c`, `154a5de`, `61667bb`, `e4c9a22` |
+| Forecast sampling ignores wave-band land sentinels instead of treating them as real sea conditions                                                                    | `ad37261`                                                                                                                                     |
+
+### UI improvements
+
+| Difference                                                                                                                                                                                  | Commits                                    |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
+| Standalone webapp and package rebranded as Sail Wayfinder with the `/signalk-wayfinder/` application and API paths                                                                          | `3900649`                                  |
+| Binnacle can discover whether routing is ready, start and cancel calculations, stream live frontiers, retrieve alternatives, and save the selected result without using the standalone form | `ef28c09`, `3900649`, `4776718`, `891e059` |
+| Route responses expose validation findings and ranked alternative summaries so Binnacle can present safety context and route choices directly                                               | `01ad74a`, `891e059`, `f8a3108`            |
+| Calculation status distinguishes forecast download from route search, giving Binnacle a useful progress state during automatic acquisition                                                  | `2c2a16e`                                  |
+| Live progress reports the bounded routing frontier rather than internal exhaustive candidates, keeping the displayed search state useful                                                    | `f85a78f`                                  |
+| The standalone motor threshold starts at a practical 3 kn for the bounded coastal-route workflow                                                                                            | `61667bb`                                  |
+
+### Performance optimizations
+
+| Difference                                                                                                                                                                             | Commits                                               |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| Alternative attempts run in a bounded worker-thread pool, with decoded GRIB data shared instead of copied to every worker                                                              | `5bf506a`, `69c29c0`                                  |
+| Direct-route alternatives come from one shared path-DAG search instead of repeated nearly identical searches                                                                           | `f9a9afe`                                             |
+| A coarse-to-fine search narrows fine routing to promising corridors while preserving obstacle-escape branches and precomputing hot-path lookup data                                    | `2bfb261`                                             |
+| Long direct routes reduce heading expansion and allocate route nodes only for candidates that survive deterministic pruning                                                            | `a0ec12e`                                             |
+| Privacy-safe phase instrumentation and repeatable Node benchmarks identify time spent in wind, polar, coast, safety, pruning, assembly, and related phases without logging coordinates | `8672d6c`, `2f82746`                                  |
+| Shoreline intersections are batched across route corridors instead of repeating equivalent coast checks                                                                                | `6a4fd77`                                             |
+| Fixed frontier slots, cheaper candidate handling, and deferred weather resampling reduce frontier and alternative-selection overhead                                                   | `9f379d1`                                             |
+| Bounded goal corridors replace exhaustive wide-area expansion, prioritize viable clearance corridors, traverse motor corridors directly, and prune before expensive shoreline checks   | `906ce8e`, `59373cf`, `2ba6d77`, `94274d1`            |
+| Unchanged decoded forecasts and indexed directory results are reused across calculations                                                                                               | `3061ae8`, `8290e37`                                  |
+| A Rust sidecar was prototyped and benchmarked, then removed after the optimized Node engine became the maintained production path                                                      | `5a801b5`, `998d808`, `ad0ad14`, `0e96373`, `3efba01` |
+
+### Documentation, packaging, and validation
+
+| Difference                                                                                                                                                                           | Commits                                                                                                      |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
+| README and development documentation cover the forked name and paths, Binnacle workflow, safety validation, passage schedules, persistent shoreline build, and performance profiling | `a2f9b81`, `01ad74a`, `be51e9d`, `56a2d93`, `b8a84b7`, `c4a6838`, `f9a9afe`, `2bfb261`, `a0ec12e`, `2f82746` |
+| The upstream project and its contributors are credited prominently at the top of the README                                                                                          | `7bbed16`                                                                                                    |
+| npm packaging includes the built runtime, and an isolated Podman test exercises the ARM64 installation path                                                                          | `006ef9c`, `7e70c7e`                                                                                         |
+
+</details>
+
 > [!CAUTION]
 > ⚠️ **Experimental — read before use.** ⚠️
 >
