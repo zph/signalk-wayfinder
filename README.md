@@ -95,9 +95,9 @@ See [CHANGELOG](CHANGELOG.md) for the full feature history.
 
 ## Requirements
 
-- SignalK server >= 2.0.0
+- SignalK server >= 2.28.0
+- [Polar Performance](https://github.com/htool/signalk-polar-performance-plugin) >= 1.4.0, enabled with an active polar selected
 - A GRIB2 weather forecast file (e.g. from [OpenSkiron](https://openskiron.org/en/icon-gribs))
-- A polar diagram file in ORC/OpenCPN CSV format
 - Platform: linux/x64 or linux/arm64 (Raspberry Pi 3/4/5, Node 22 or 24)
 
 The full specification — implemented requirements, open backlog, and design decisions — is in [SPEC.md](SPEC.md).
@@ -111,7 +111,11 @@ Not massive:
 
 ## Setup and configuration
 
-Install from the **SignalK App Store** (Server → Appstore → Available) and restart SignalK.
+Install **Sail Wayfinder** from the SignalK App Store. Polar Performance is declared as a required
+companion plugin, so the App Store will offer to install it with Wayfinder. Restart SignalK, open Polar
+Performance, import or select the boat's polar, and make it active. Wayfinder automatically loads that
+active canonical polar and applies Polar Performance's configured performance adjustment; there is no
+separate polar-file setting in Wayfinder.
 
 The land index (GSHHG coastlines) is bundled — no download is needed at install or runtime.
 
@@ -141,10 +145,14 @@ Open **Server → Plugin Config → Sail Wayfinder** in the SignalK admin UI.
 
 ### Required settings
 
-| Setting     | Description                                                |
-| ----------- | ---------------------------------------------------------- |
-| `gribDir`   | Full path to the directory containing GRIB2 forecast files |
-| `polarPath` | Full path to the polar diagram CSV file                    |
+| Setting   | Description                                                |
+| --------- | ---------------------------------------------------------- |
+| `gribDir` | Full path to the directory containing GRIB2 forecast files |
+
+Wayfinder reads Polar Performance's active canonical resource from the shared Signal K configuration
+directory. The optional `polarPerformanceUrl` setting switches to its REST API and is only needed when
+the plugins are separated by a container or proxy; that endpoint must be reachable with the proxy's
+authentication policy.
 
 ### Algorithm tuning
 

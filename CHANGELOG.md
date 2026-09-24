@@ -2,6 +2,7 @@
 
 ## Upcoming
 
+- Polar Performance >= 1.4.0 is now Wayfinder's canonical polar provider. Wayfinder automatically loads its active polar and performance adjustment from the shared Signal K data directory (or an explicitly configured REST endpoint), replacing the separate `polarPath` configuration.
 - **Grib Manager** (REQ-131): the sidebar GRIB file list is replaced by a "Grib Manager" modal — each loaded file shown on a coverage timeline (to scale), with staleness/wave badges, a now line, a low-confidence band past the forecast skill horizon, and granularity-change markers. Includes an optimised-combination proposal (departure-aware) and Accept proposed / Enable all controls.
 - Wind GRIB selection now ranks by model run (`referenceTime`) → finest granularity → finest spatial resolution → file mtime, in a single pass — a re-downloaded old forecast no longer overrides a newer model run (resolves BUG-129).
 - New `/grib-times` (per-file actual timestep axes) and `/grib-combination` (departure-aware geographic stitch) endpoints.
